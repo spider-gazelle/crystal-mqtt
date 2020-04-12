@@ -202,6 +202,410 @@ module MQTT::V3
           Bytes[0x04, 0x02, 0x00, 0x0f, 0x00, 0x08], "myclient"
         ).to_slice)
       end
+
+      it "should parse a simple 3.1.0 Connect packet" do
+        io = combine(Bytes[0x10, 0x16, 0x00, 0x06], "MQIsdp", Bytes[0x03, 0x00, 0x00, 0x0a, 0x00, 0x08], "myclient")
+
+        # Grab the packet type
+        case MQTT.peek_type(io)
+        when RequestType::Connect
+          packet = io.read_bytes Connect
+          packet.qos.should eq(QoS::FireAndForget)
+          packet.name.should eq("MQIsdp")
+          packet.version.should eq(Version::V31)
+          packet.client_id.should eq("myclient")
+          packet.keep_alive_seconds.should eq(10)
+          packet.clean_start.should eq(false)
+        else
+          raise "incorrect packet type"
+        end
+      end
+
+      it "should parse a simple 3.1.1 Connect packet" do
+        io = combine(Bytes[0x10, 0x14, 0x00, 0x04], "MQTT", Bytes[0x04, 0x00, 0x00, 0x0a, 0x00, 0x08], "myclient")
+
+        # Grab the packet type
+        case MQTT.peek_type(io)
+        when RequestType::Connect
+          packet = io.read_bytes Connect
+          packet.qos.should eq(QoS::FireAndForget)
+          packet.name.should eq("MQTT")
+          packet.version.should eq(Version::V311)
+          packet.client_id.should eq("myclient")
+          packet.keep_alive_seconds.should eq(10)
+          packet.clean_start.should eq(false)
+        else
+          raise "incorrect packet type"
+        end
+      end
+
+      it "should parse a Connect packet with the clean session flag set" do
+        io = combine(Bytes[0x10, 0x16, 0x00, 0x06], "MQIsdp", Bytes[0x03, 0x02, 0x00, 0x0a, 0x00, 0x08], "myclient")
+
+        # Grab the packet type
+        case MQTT.peek_type(io)
+        when RequestType::Connect
+          packet = io.read_bytes Connect
+          packet.qos.should eq(QoS::FireAndForget)
+          packet.name.should eq("MQIsdp")
+          packet.version.should eq(Version::V31)
+          packet.client_id.should eq("myclient")
+          packet.keep_alive_seconds.should eq(10)
+          packet.clean_start.should eq(true)
+        else
+          raise "incorrect packet type"
+        end
+      end
+
+      it "should parse a Connect packet with a Will and Testament" do
+        io = combine(Bytes[0x10, 0x24, 0x00, 0x06], "MQIsdp", Bytes[0x03, 0x0e, 0x00, 0x0a, 0x00, 0x08], "myclient", Bytes[0x00, 0x05], "topic", Bytes[0x00, 0x05], "hello")
+
+        # Grab the packet type
+        case MQTT.peek_type(io)
+        when RequestType::Connect
+          packet = io.read_bytes Connect
+          packet.qos.should eq(QoS::FireAndForget)
+          packet.name.should eq("MQIsdp")
+          packet.version.should eq(Version::V31)
+          packet.client_id.should eq("myclient")
+          packet.keep_alive_seconds.should eq(10)
+          packet.clean_start.should eq(true)
+          packet.will_topic.should eq("topic")
+          packet.will_payload.should eq("hello")
+          packet.will_flag.should eq(true)
+          packet.will_qos.should eq(QoS::BrokerReceived)
+        else
+          raise "incorrect packet type"
+        end
+      end
+
+      it "should parse a Connect packet with a username and password" do
+        io = combine(Bytes[0x10, 0x2a, 0x00, 0x06], "MQIsdp", Bytes[0x03, 0xc0, 0x00, 0x0a, 0x00, 0x08], "myclient", Bytes[0x00, 0x08], "username", Bytes[0x00, 0x08], "password")
+
+        # Grab the packet type
+        case MQTT.peek_type(io)
+        when RequestType::Connect
+          packet = io.read_bytes Connect
+          packet.qos.should eq(QoS::FireAndForget)
+          packet.name.should eq("MQIsdp")
+          packet.version.should eq(Version::V31)
+          packet.client_id.should eq("myclient")
+          packet.keep_alive_seconds.should eq(10)
+          packet.clean_start.should eq(false)
+          packet.username.should eq("username")
+          packet.password.should eq("password")
+          packet.will_flag.should eq(false)
+        else
+          raise "incorrect packet type"
+        end
+      end
+
+      it "should parse a Connect packet with a username and no password" do
+        io = combine(Bytes[0x10, 0x20, 0x00, 0x06], "MQIsdp", Bytes[0x03, 0x80, 0x00, 0x0a, 0x00, 0x08], "myclient", Bytes[0x00, 0x08], "username")
+
+        # Grab the packet type
+        case MQTT.peek_type(io)
+        when RequestType::Connect
+          packet = io.read_bytes Connect
+          packet.qos.should eq(QoS::FireAndForget)
+          packet.name.should eq("MQIsdp")
+          packet.version.should eq(Version::V31)
+          packet.client_id.should eq("myclient")
+          packet.keep_alive_seconds.should eq(10)
+          packet.clean_start.should eq(false)
+          packet.username.should eq("username")
+          packet.password.should eq("")
+          packet.will_flag.should eq(false)
+        else
+          raise "incorrect packet type"
+        end
+      end
+
+      it "should parse a Connect packet with a password and no username" do
+        io = combine(Bytes[0x10, 0x20, 0x00, 0x06], "MQIsdp", Bytes[0x03, 0x40, 0x00, 0x0a, 0x00, 0x08], "myclient", Bytes[0x00, 0x08], "password")
+
+        # Grab the packet type
+        case MQTT.peek_type(io)
+        when RequestType::Connect
+          packet = io.read_bytes Connect
+          packet.qos.should eq(QoS::FireAndForget)
+          packet.name.should eq("MQIsdp")
+          packet.version.should eq(Version::V31)
+          packet.client_id.should eq("myclient")
+          packet.keep_alive_seconds.should eq(10)
+          packet.clean_start.should eq(false)
+          packet.username.should eq("")
+          packet.password.should eq("password")
+          packet.will_flag.should eq(false)
+        else
+          raise "incorrect packet type"
+        end
+      end
+
+      it "should parse a Connect packet with every option set" do
+        io = combine(
+          Bytes[0x10, 0x5f, 0x00, 0x06], "MQIsdp",
+          Bytes[0x03, 0xf6, 0xff, 0xff, 0x00, 0x17], "12345678901234567890123",
+          Bytes[0x00, 0x0a], "will_topic", Bytes[0x00, 0x0c], "will_message",
+          Bytes[0x00, 0x0e], "user0123456789", Bytes[0x00, 0x0e], "pass0123456789"
+        )
+
+        # Grab the packet type
+        case MQTT.peek_type(io)
+        when RequestType::Connect
+          packet = io.read_bytes Connect
+          packet.qos.should eq(QoS::FireAndForget)
+          packet.name.should eq("MQIsdp")
+          packet.version.should eq(Version::V31)
+          packet.client_id.should eq("12345678901234567890123")
+          packet.keep_alive_seconds.should eq(65535)
+          packet.username.should eq("user0123456789")
+          packet.password.should eq("pass0123456789")
+          packet.clean_start.should eq(true)
+          packet.will_topic.should eq("will_topic")
+          packet.will_payload.should eq("will_message")
+          packet.will_flag.should eq(true)
+        else
+          raise "incorrect packet type"
+        end
+      end
+    end
+
+    describe Connack do
+      it "should output the correct bytes for a sucessful connection acknowledgement packet without Session Present set" do
+        packet = new_connack_packet
+        packet.header.packet_length = packet.packet_length
+
+        packet.to_slice.should eq(combine(Bytes[0x20, 0x02, 0x00, 0x00]).to_slice)
+      end
+
+      it "should output the correct bytes for a sucessful connection acknowledgement packet with Session Present set" do
+        packet = new_connack_packet
+        packet.session_present = true
+        packet.header.packet_length = packet.packet_length
+
+        packet.to_slice.should eq(combine(Bytes[0x20, 0x02, 0x01, 0x00]).to_slice)
+      end
+
+      it "should parse a successful Connection Accepted packet" do
+        io = combine(Bytes[0x20, 0x02, 0x00, 0x00])
+
+        # Grab the packet type
+        case MQTT.peek_type(io)
+        when RequestType::Connack
+          packet = io.read_bytes Connack
+          packet.session_present.should eq(false)
+          packet.return_code.should eq(0)
+          packet.success?.should eq(true)
+        else
+          raise "incorrect packet type"
+        end
+      end
+
+      it "should parse a successful Connection Accepted packet with Session Present set" do
+        io = combine(Bytes[0x20, 0x02, 0x01, 0x00])
+
+        # Grab the packet type
+        case MQTT.peek_type(io)
+        when RequestType::Connack
+          packet = io.read_bytes Connack
+          packet.session_present.should eq(true)
+          packet.return_code.should eq(0)
+          packet.success?.should eq(true)
+        else
+          raise "incorrect packet type"
+        end
+      end
+
+      it "should parse a client identifier rejected packet" do
+        io = combine(Bytes[0x20, 0x02, 0x00, 0x02])
+
+        # Grab the packet type
+        case MQTT.peek_type(io)
+        when RequestType::Connack
+          packet = io.read_bytes Connack
+          packet.session_present.should eq(false)
+          packet.return_code.should eq(2)
+          packet.success?.should eq(false)
+
+          expect_raises(::Exception, "Connection refused: client identifier rejected") do
+            packet.success!
+          end
+        else
+          raise "incorrect packet type"
+        end
+      end
+    end
+
+    describe Puback do
+      it "should output the correct bytes for a sucessful connection acknowledgement packet without Session Present set" do
+        packet = MQTT::V3::Puback.new
+        packet.header.id = MQTT::RequestType::Puback
+        packet.message_id = 0x1234_u16
+        packet.header.packet_length = packet.packet_length
+
+        packet.to_slice.should eq(combine(Bytes[0x40, 0x02, 0x12, 0x34]).to_slice)
+      end
+
+      it "should parse a packet" do
+        io = combine(Bytes[0x40, 0x02, 0x12, 0x34])
+
+        # Grab the packet type
+        case MQTT.peek_type(io)
+        when RequestType::Puback
+          packet = io.read_bytes Puback
+          packet.message_id.should eq(0x1234)
+        else
+          raise "incorrect packet type"
+        end
+      end
+    end
+
+    describe Subscribe do
+      it "should output the correct bytes for a packet with a single topic" do
+        packet = MQTT::V3::Subscribe.new
+        packet.header.id = MQTT::RequestType::Subscribe
+        packet.qos = QoS::BrokerReceived
+        packet.message_id = 1_u16
+        packet.topic = "a/b"
+        packet.header.packet_length = packet.packet_length
+
+        packet.to_slice.should eq(combine(
+          Bytes[0x82, 0x08, 0x00, 0x01, 0x00, 0x03], "a/b", Bytes[0x00]
+        ).to_slice)
+      end
+
+      it "should output the correct bytes for a packet with multiple topics" do
+        packet = MQTT::V3::Subscribe.new
+        packet.header.id = MQTT::RequestType::Subscribe
+        packet.qos = QoS::BrokerReceived
+        packet.message_id = 6_u16
+        packet.topics = {
+          "a/b" => QoS::FireAndForget,
+          "c/d" => QoS::BrokerReceived,
+        }
+        packet.header.packet_length = packet.packet_length
+
+        packet.to_slice.should eq(combine(
+          Bytes[0x82, 0x0e, 0x00, 0x06, 0x00, 0x03],
+          "a/b", Bytes[0x00, 0x00, 0x03], "c/d", Bytes[0x01]
+        ).to_slice)
+      end
+
+      it "should parse a packet with a single topic" do
+        io = combine(Bytes[0x82, 0x08, 0x00, 0x01, 0x00, 0x03], "a/b", Bytes[0x00])
+
+        # Grab the packet type
+        case MQTT.peek_type(io)
+        when RequestType::Subscribe
+          packet = io.read_bytes Subscribe
+          packet.message_id.should eq(1)
+          packet.topic_hash.should eq({
+            "a/b" => QoS::FireAndForget,
+          })
+        else
+          raise "incorrect packet type"
+        end
+      end
+
+      it "should parse a packet with two topics" do
+        io = combine(Bytes[0x82, 0x0e, 0x00, 0x06, 0x00, 0x03], "a/b", Bytes[0x00], Bytes[0x00, 0x03], "c/d", Bytes[0x01])
+
+        # Grab the packet type
+        case MQTT.peek_type(io)
+        when RequestType::Subscribe
+          packet = io.read_bytes Subscribe
+          packet.message_id.should eq(6)
+          packet.topic_hash.should eq({
+            "a/b" => QoS::FireAndForget,
+            "c/d" => QoS::BrokerReceived,
+          })
+        else
+          raise "incorrect packet type"
+        end
+      end
+    end
+
+    describe Suback do
+      it "should output the correct bytes for an acknowledgement to a single topic" do
+        packet = MQTT::V3::Suback.new
+        packet.header.id = MQTT::RequestType::Suback
+        packet.message_id = 5_u16
+        packet.return_codes = [QoS::FireAndForget]
+        packet.header.packet_length = packet.packet_length
+
+        packet.to_slice.should eq(combine(
+          Bytes[0x90, 0x03, 0x00, 0x05, 0x00]
+        ).to_slice)
+      end
+
+      it "should output the correct bytes for an acknowledgement for two topics" do
+        packet = MQTT::V3::Suback.new
+        packet.header.id = MQTT::RequestType::Suback
+        packet.message_id = 6_u16
+        packet.return_codes = [QoS::FireAndForget, QoS::BrokerReceived]
+        packet.header.packet_length = packet.packet_length
+
+        packet.to_slice.should eq(combine(
+          Bytes[0x90, 0x04, 0x00, 0x06, 0x00, 0x01]
+        ).to_slice)
+      end
+
+      it "should parse a packet with a topic" do
+        io = combine(Bytes[0x90, 0x03, 0x12, 0x34, 0x00])
+
+        # Grab the packet type
+        case MQTT.peek_type(io)
+        when RequestType::Suback
+          packet = io.read_bytes Suback
+          packet.message_id.should eq(0x1234)
+          packet.return_codes.should eq([
+            QoS::FireAndForget,
+          ])
+        else
+          raise "incorrect packet type"
+        end
+      end
+
+      it "should parse a packet with two topics" do
+        io = combine(Bytes[0x90, 0x04, 0x12, 0x34, 0x01, 0x01])
+
+        # Grab the packet type
+        case MQTT.peek_type(io)
+        when RequestType::Suback
+          packet = io.read_bytes Suback
+          packet.message_id.should eq(0x1234)
+          packet.return_codes.should eq([
+            QoS::BrokerReceived, QoS::BrokerReceived,
+          ])
+        else
+          raise "incorrect packet type"
+        end
+      end
+    end
+
+    describe Pingreq do
+      it "should output the correct bytes for a packet with no flags" do
+        packet = MQTT::V3::Pingreq.new
+        packet.header.id = MQTT::RequestType::Pingreq
+        packet.header.packet_length = packet.packet_length
+
+        packet.to_slice.should eq(combine(
+          Bytes[0xc0, 0x00]
+        ).to_slice)
+      end
+
+      it "should parse a packet" do
+        io = combine(Bytes[0xc0, 0x00])
+
+        # Grab the packet type
+        case MQTT.peek_type(io)
+        when RequestType::Pingreq
+          packet = io.read_bytes Pingreq
+        else
+          raise "incorrect packet type"
+        end
+      end
     end
   end # describe MQTT::V3
 end   # MQTT::V3

@@ -33,3 +33,9 @@ def new_connect_packet(version : MQTT::Version, client_id : String)
   packet.keep_alive_seconds = 15
   packet
 end
+
+def new_connack_packet
+  packet = MQTT::V3::Connack.new
+  packet.header.id = MQTT::RequestType::Connack
+  packet
+end

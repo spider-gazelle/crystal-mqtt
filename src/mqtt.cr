@@ -99,4 +99,4 @@ module MQTT
   end
 end
 
-require "./mqtt/v3/packets"
+require "./mqtt/v3/*"
