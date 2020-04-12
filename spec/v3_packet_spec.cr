@@ -601,7 +601,7 @@ module MQTT::V3
         # Grab the packet type
         case MQTT.peek_type(io)
         when RequestType::Pingreq
-          packet = io.read_bytes Pingreq
+          io.read_bytes Pingreq
         else
           raise "incorrect packet type"
         end
