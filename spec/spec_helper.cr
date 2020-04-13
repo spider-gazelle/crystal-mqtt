@@ -12,13 +12,13 @@ end
 
 def new_publish_packet
   packet = MQTT::V3::Publish.new
-  packet.header.id = MQTT::RequestType::Publish
+  packet.id = MQTT::RequestType::Publish
   packet
 end
 
 def new_connect_packet(version : MQTT::Version, client_id : String)
   packet = MQTT::V3::Connect.new
-  packet.header.id = MQTT::RequestType::Connect
+  packet.id = MQTT::RequestType::Connect
   case version
   when MQTT::Version::V31
     packet.version = MQTT::Version::V31
@@ -36,6 +36,6 @@ end
 
 def new_connack_packet
   packet = MQTT::V3::Connack.new
-  packet.header.id = MQTT::RequestType::Connack
+  packet.id = MQTT::RequestType::Connack
   packet
 end

@@ -7,7 +7,7 @@ module MQTT::V3
         packet = new_publish_packet
         packet.topic = "test"
         packet.payload = "hello world"
-        packet.header.packet_length = packet.packet_length
+        packet.packet_length = packet.calculate_length
         packet.to_slice.should eq(combine(Bytes[0x30, 0x11, 0x00, 0x04], "testhello world").to_slice)
       end
 
@@ -17,7 +17,7 @@ module MQTT::V3
         packet.qos = QoS::BrokerReceived
         packet.topic = "a/b"
         packet.payload = "hello world"
-        packet.header.packet_length = packet.packet_length
+        packet.packet_length = packet.calculate_length
 
         packet.to_slice.should eq(combine(Bytes[0x32, 0x12, 0x00, 0x03], "a/b", Bytes[0x00, 0x05], "hello world").to_slice)
       end
@@ -29,7 +29,7 @@ module MQTT::V3
         packet.retain = true
         packet.topic = "c/d"
         packet.payload = "hello world"
-        packet.header.packet_length = packet.packet_length
+        packet.packet_length = packet.calculate_length
 
         packet.to_slice.should eq(combine(Bytes[0x35, 0x12, 0x00, 0x03], "c/d", Bytes[0x00, 0x05], "hello world").to_slice)
       end
@@ -41,7 +41,7 @@ module MQTT::V3
         packet.duplicate = true
         packet.topic = "c/d"
         packet.payload = "hello world"
-        packet.header.packet_length = packet.packet_length
+        packet.packet_length = packet.calculate_length
 
         packet.to_slice.should eq(combine(Bytes[0x3C, 0x12, 0x00, 0x03], "c/d", Bytes[0x00, 0x05], "hello world").to_slice)
       end
@@ -49,7 +49,7 @@ module MQTT::V3
       it "should output the correct bytes for a packet with an empty payload" do
         packet = new_publish_packet
         packet.topic = "test"
-        packet.header.packet_length = packet.packet_length
+        packet.packet_length = packet.calculate_length
         packet.to_slice.should eq(combine(Bytes[0x30, 0x06, 0x00, 0x04], "test").to_slice)
       end
     end
@@ -137,14 +137,14 @@ module MQTT::V3
       packet = new_publish_packet
       packet.topic = "Test ①"
       packet.payload = "Snowman: ☃"
-      packet.header.packet_length = packet.packet_length
+      packet.packet_length = packet.calculate_length
       packet.to_slice.should eq(combine(Bytes[0x30, 0x16, 0x00, 0x08], "Test ", Bytes[0xE2, 0x91, 0xA0], "Snowman: ", Bytes[0xE2, 0x98, 0x83]).to_slice)
     end
 
     describe Connect do
       it "should output the correct bytes for a packet with no flags" do
         packet = new_connect_packet(Version::V31, "myclient")
-        packet.header.packet_length = packet.packet_length
+        packet.packet_length = packet.calculate_length
         packet.to_slice.should eq(combine(
           Bytes[0x10, 0x16, 0x00, 0x06], "MQIsdp",
           Bytes[0x03, 0x02, 0x00, 0x0f, 0x00, 0x08], "myclient"
@@ -156,7 +156,7 @@ module MQTT::V3
         packet.will_qos = QoS::BrokerReceived
         packet.will_topic = "topic"
         packet.will_payload = "hello"
-        packet.header.packet_length = packet.packet_length
+        packet.packet_length = packet.calculate_length
         packet.to_slice.should eq(combine(
           Bytes[0x10, 0x24, 0x00, 0x06], "MQIsdp",
           Bytes[0x03, 0x0e, 0x00, 0x0f, 0x00, 0x08], "myclient",
@@ -168,7 +168,7 @@ module MQTT::V3
         packet = new_connect_packet(Version::V31, "myclient")
         packet.username = "username"
         packet.password = "password"
-        packet.header.packet_length = packet.packet_length
+        packet.packet_length = packet.calculate_length
         packet.to_slice.should eq(combine(
           Bytes[0x10, 0x2A, 0x00, 0x06], "MQIsdp",
           Bytes[0x03, 0xC2, 0x00, 0x0f, 0x00, 0x08], "myclient",
@@ -185,7 +185,7 @@ module MQTT::V3
         packet.keep_alive_seconds = 65535
         packet.username = "user0123456789"
         packet.password = "pass0123456789"
-        packet.header.packet_length = packet.packet_length
+        packet.packet_length = packet.calculate_length
         packet.to_slice.should eq(combine(
           Bytes[0x10, 0x5F, 0x00, 0x06], "MQIsdp",
           Bytes[0x03, 0xf6, 0xff, 0xff, 0x00, 0x17], "12345678901234567890123",
@@ -196,7 +196,7 @@ module MQTT::V3
 
       it "should output the correct bytes for a 3.1.1 packet with no flags" do
         packet = new_connect_packet(Version::V311, "myclient")
-        packet.header.packet_length = packet.packet_length
+        packet.packet_length = packet.calculate_length
         packet.to_slice.should eq(combine(
           Bytes[0x10, 0x14, 0x00, 0x04], "MQTT",
           Bytes[0x04, 0x02, 0x00, 0x0f, 0x00, 0x08], "myclient"
@@ -374,7 +374,7 @@ module MQTT::V3
     describe Connack do
       it "should output the correct bytes for a sucessful connection acknowledgement packet without Session Present set" do
         packet = new_connack_packet
-        packet.header.packet_length = packet.packet_length
+        packet.packet_length = packet.calculate_length
 
         packet.to_slice.should eq(combine(Bytes[0x20, 0x02, 0x00, 0x00]).to_slice)
       end
@@ -382,7 +382,7 @@ module MQTT::V3
       it "should output the correct bytes for a sucessful connection acknowledgement packet with Session Present set" do
         packet = new_connack_packet
         packet.session_present = true
-        packet.header.packet_length = packet.packet_length
+        packet.packet_length = packet.calculate_length
 
         packet.to_slice.should eq(combine(Bytes[0x20, 0x02, 0x01, 0x00]).to_slice)
       end
@@ -440,9 +440,9 @@ module MQTT::V3
     describe Puback do
       it "should output the correct bytes for a sucessful connection acknowledgement packet without Session Present set" do
         packet = MQTT::V3::Puback.new
-        packet.header.id = MQTT::RequestType::Puback
+        packet.id = MQTT::RequestType::Puback
         packet.message_id = 0x1234_u16
-        packet.header.packet_length = packet.packet_length
+        packet.packet_length = packet.calculate_length
 
         packet.to_slice.should eq(combine(Bytes[0x40, 0x02, 0x12, 0x34]).to_slice)
       end
@@ -464,11 +464,11 @@ module MQTT::V3
     describe Subscribe do
       it "should output the correct bytes for a packet with a single topic" do
         packet = MQTT::V3::Subscribe.new
-        packet.header.id = MQTT::RequestType::Subscribe
+        packet.id = MQTT::RequestType::Subscribe
         packet.qos = QoS::BrokerReceived
         packet.message_id = 1_u16
         packet.topic = "a/b"
-        packet.header.packet_length = packet.packet_length
+        packet.packet_length = packet.calculate_length
 
         packet.to_slice.should eq(combine(
           Bytes[0x82, 0x08, 0x00, 0x01, 0x00, 0x03], "a/b", Bytes[0x00]
@@ -477,14 +477,14 @@ module MQTT::V3
 
       it "should output the correct bytes for a packet with multiple topics" do
         packet = MQTT::V3::Subscribe.new
-        packet.header.id = MQTT::RequestType::Subscribe
+        packet.id = MQTT::RequestType::Subscribe
         packet.qos = QoS::BrokerReceived
         packet.message_id = 6_u16
         packet.topics = {
           "a/b" => QoS::FireAndForget,
           "c/d" => QoS::BrokerReceived,
         }
-        packet.header.packet_length = packet.packet_length
+        packet.packet_length = packet.calculate_length
 
         packet.to_slice.should eq(combine(
           Bytes[0x82, 0x0e, 0x00, 0x06, 0x00, 0x03],
@@ -529,10 +529,10 @@ module MQTT::V3
     describe Suback do
       it "should output the correct bytes for an acknowledgement to a single topic" do
         packet = MQTT::V3::Suback.new
-        packet.header.id = MQTT::RequestType::Suback
+        packet.id = MQTT::RequestType::Suback
         packet.message_id = 5_u16
         packet.return_codes = [QoS::FireAndForget]
-        packet.header.packet_length = packet.packet_length
+        packet.packet_length = packet.calculate_length
 
         packet.to_slice.should eq(combine(
           Bytes[0x90, 0x03, 0x00, 0x05, 0x00]
@@ -541,10 +541,10 @@ module MQTT::V3
 
       it "should output the correct bytes for an acknowledgement for two topics" do
         packet = MQTT::V3::Suback.new
-        packet.header.id = MQTT::RequestType::Suback
+        packet.id = MQTT::RequestType::Suback
         packet.message_id = 6_u16
         packet.return_codes = [QoS::FireAndForget, QoS::BrokerReceived]
-        packet.header.packet_length = packet.packet_length
+        packet.packet_length = packet.calculate_length
 
         packet.to_slice.should eq(combine(
           Bytes[0x90, 0x04, 0x00, 0x06, 0x00, 0x01]
@@ -587,8 +587,8 @@ module MQTT::V3
     describe Pingreq do
       it "should output the correct bytes for a packet with no flags" do
         packet = MQTT::V3::Pingreq.new
-        packet.header.id = MQTT::RequestType::Pingreq
-        packet.header.packet_length = packet.packet_length
+        packet.id = MQTT::RequestType::Pingreq
+        packet.packet_length = packet.calculate_length
 
         packet.to_slice.should eq(combine(
           Bytes[0xc0, 0x00]

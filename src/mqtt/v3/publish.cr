@@ -2,26 +2,21 @@ require "./header"
 
 module MQTT
   module V3
-    class Publish < BinData
+    class Publish < Header
       endian big
-
-      custom header : Header = Header.new
 
       # The topic name to publish to
       MQTT.string topic
-      uint16 :message_id, onlyif: ->{ header.qos? }
+      uint16 :message_id, onlyif: ->{ qos? }
 
       # The data to be published
       bytes :payload, length: ->{
-        len = header.packet_length - (topic.bytesize + 2)
-        len -= 2 if header.qos?
+        len = packet_length - (topic.bytesize + 2)
+        len -= 2 if qos?
         len
       }
 
-      delegate :id, :id=, :duplicate, :duplicate=, to: @header
-      delegate :qos, :qos?, :qos=, :retain, :retain=, to: @header
-
-      def packet_length : UInt32
+      def calculate_length : UInt32
         size = payload.size.to_u32
         size += topic.bytesize + 2
         size += 2 if qos?

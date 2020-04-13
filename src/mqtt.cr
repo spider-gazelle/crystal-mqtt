@@ -1,4 +1,8 @@
+require "log"
+
 module MQTT
+  Log = ::Log.for("mqtt")
+
   # Default port number for unencrypted connections
   DEFAULT_PORT = 1883
 

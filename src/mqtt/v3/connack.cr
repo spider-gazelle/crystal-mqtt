@@ -3,10 +3,8 @@ require "./header"
 module MQTT
   module V3
     # Class representing an MQTT Connect Acknowledgment Packet
-    class Connack < BinData
+    class Connack < Header
       endian big
-
-      custom header : Header = Header.new
 
       bit_field do
         bits 7, :_reserved_
@@ -16,10 +14,7 @@ module MQTT
       # The return code (defaults to 0 for connection accepted)
       uint8 :return_code
 
-      delegate :id, :id=, :duplicate, :duplicate=, to: @header
-      delegate :qos, :qos?, :qos=, :retain, :retain=, to: @header
-
-      def packet_length : UInt32
+      def calculate_length : UInt32
         2_u32
       end
 

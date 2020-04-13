@@ -3,10 +3,8 @@ require "./header"
 module MQTT
   module V3
     # Class representing an MQTT Connect Packet
-    class Connect < BinData
+    class Connect < Header
       endian big
-
-      custom header : Header = Header.new
 
       # The name of the protocol
       MQTT.string name, default: Version::V311.connect_name
@@ -24,6 +22,7 @@ module MQTT
         # flag to indicate if the will topic will be set
         bool will_flag
         # Set to false to keep a persistent session with the server
+        # http://www.steves-internet-guide.com/mqtt-clean-sessions-example/
         bool clean_start
         bits 1, :_reserved_
       end
@@ -49,11 +48,8 @@ module MQTT
         self.has_password = true
       end
 
-      delegate :id, :id=, :duplicate, :duplicate=, to: @header
-      delegate :qos, :qos?, :qos=, :retain, :retain=, to: @header
-
       # Packet length, excluding header
-      def packet_length : UInt32
+      def calculate_length : UInt32
         size = 4_u32 + (name.bytesize + 2) + (client_id.bytesize + 2)
         size += (will_topic.bytesize + 2) if will_flag
         size += (will_payload.bytesize + 2) if will_flag

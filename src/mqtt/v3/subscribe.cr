@@ -14,24 +14,20 @@ module MQTT
       end
     end
 
-    class Subscribe < BinData
+    class Subscribe < Header
       endian big
 
       # NOTE:: `qos` should be `BrokerReceived`
 
-      custom header : Header = Header.new
       uint16 :message_id
 
       # Will continue reading data into the array until the
       #  sum of the topics array + 2 message_id bytes equals the total size
       variable_array topics : Topic, read_next: ->{
-        packet_length < header.packet_length
+        calculate_length < packet_length
       }
 
-      delegate :id, :id=, :duplicate, :duplicate=, to: @header
-      delegate :qos, :qos?, :qos=, :retain, :retain=, to: @header
-
-      def packet_length : UInt32
+      def calculate_length : UInt32
         topics.sum(2_u32, &.bytesize)
       end
 
