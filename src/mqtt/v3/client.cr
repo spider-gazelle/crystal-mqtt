@@ -16,6 +16,7 @@ module MQTT
       @message_lock = Mutex.new
 
       @message_id = 0_u16
+
       protected def next_message_id
         # Allow overflows
         @message_id = @message_id &+ 1
@@ -62,12 +63,7 @@ module MQTT
 
       # NOTE:: Unsubscribe is the same class as Subscribe
       alias Request = Connect | Publish | Subscribe | EmptyPacket
-      @processor = ::Channel(
-        Tuple(
-          Request,
-          Promise::DeferredPromise(Connack) | Promise::DeferredPromise(Suback) | Promise::DeferredPromise(Ack) | Promise::DeferredPromise(Bool)
-        )
-      ).new(8)
+      @processor = ::Channel(Tuple(Request, Promise::DeferredPromise(Connack) | Promise::DeferredPromise(Suback) | Promise::DeferredPromise(Ack) | Promise::DeferredPromise(Bool))).new(8)
 
       protected def process_requests!
         Log.debug { "request processing has started..." }
@@ -121,7 +117,7 @@ module MQTT
         client_id : String = MQTT.generate_client_id,
         clean_start : Bool = true,
         dns_timeout : Int32 = 10,
-        connect_timeout : Int32 = 10,
+        connect_timeout : Int32 = 10
       )
         return @waiting_connect.not_nil!.get if connected?
 
@@ -239,7 +235,7 @@ module MQTT
             @waiting_suback[next_id] = promise
 
             # Update the callbacks
-            topics.each do |topic, (qos, proc)|
+            topics.each do |topic, (_, proc)|
               @subscription_cbs[topic] << proc
             end
 
@@ -255,9 +251,9 @@ module MQTT
           # Configure the callback QoS
           index = 0
           @message_lock.synchronize do
-            topics.each do |topic, (qos, proc)|
+            topics.each_key do |topic|
               ack_qos = return_codes[index]
-              @subscription_qos[topic] = qos
+              @subscription_qos[topic] = ack_qos
               index += 1
             end
           end
@@ -266,7 +262,7 @@ module MQTT
 
           # Remove callbacks that failed to configure
           @message_lock.synchronize do
-            topics.each do |topic, (qos, proc)|
+            topics.each do |topic, (_, proc)|
               array = @subscription_cbs[topic]
               array.delete(proc)
               if array.empty?
@@ -321,9 +317,9 @@ module MQTT
 
         promise = Promise::DeferredPromise(Unsuback).new
         sub.message_id = @message_lock.synchronize do
-           next_id = next_message_id
-           @waiting_ack[next_id] = promise
-           next_id
+          next_id = next_message_id
+          @waiting_ack[next_id] = promise
+          next_id
         end
         @processor.send({sub, promise})
         promise.get
@@ -377,9 +373,9 @@ module MQTT
         @message_lock.synchronize do
           @waiting_connect.try &.reject(error)
           @waiting_connect = nil
-          @waiting_suback.each { |key, value| value.reject(error) }
+          @waiting_suback.each_value { |value| value.reject(error) }
           @waiting_suback.clear
-          @waiting_ack.each { |key, value| value.reject(error) }
+          @waiting_ack.each_value { |value| value.reject(error) }
           @waiting_ack.clear
           @wait_close.close
         end
@@ -485,5 +481,5 @@ module MQTT
         topic_array.size == length
       end
     end # Client
-  end # V3
-end # MQTT
+  end   # V3
+end     # MQTT
