@@ -1,7 +1,8 @@
 require "log"
+require "random"
 
 module MQTT
-  Log = ::Log.for("mqtt")
+  Log = ::Log.for(self)
 
   # Default port number for unencrypted connections
   DEFAULT_PORT = 1883
@@ -74,6 +75,10 @@ module MQTT
 
   def self.peek_type(io : IO)
     RequestType.from_value(io.peek[0] >> 4)
+  end
+
+  def self.generate_client_id(prefix = "crystal")
+    "#{prefix}#{Random::Secure.hex(8)}"
   end
 
   # Super-class for other MQTT related exceptions

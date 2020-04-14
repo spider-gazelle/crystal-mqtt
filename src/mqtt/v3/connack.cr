@@ -31,7 +31,7 @@ module MQTT
       end
 
       def success!
-        return true if success?
+        return self if success?
         raise (REFUSAL_CODES[return_code]? || "Connection refused: error code #{return_code}")
       end
     end
