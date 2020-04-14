@@ -607,5 +607,49 @@ module MQTT::V3
         end
       end
     end
+
+    describe Unsubscribe do
+      it "should output the correct bytes for a packet with single topic" do
+        packet = MQTT::V3::Unsubscribe.new
+        packet.id = MQTT::RequestType::Unsubscribe
+        packet.qos = QoS::BrokerReceived
+        packet.message_id = 5_u16
+        packet.topic = "a/b"
+        packet.packet_length = packet.calculate_length
+
+        packet.to_slice.should eq(combine(
+          Bytes[0xa2, 0x07, 0x00, 0x05, 0x00, 0x03], "a/b"
+        ).to_slice)
+      end
+
+      it "should output the correct bytes for a packet with multiple topics" do
+        packet = MQTT::V3::Unsubscribe.new
+        packet.id = MQTT::RequestType::Unsubscribe
+        packet.qos = QoS::BrokerReceived
+        packet.message_id = 6_u16
+        packet.topics = ["a/b", "c/d"]
+        packet.packet_length = packet.calculate_length
+
+        packet.to_slice.should eq(combine(
+          Bytes[0xa2, 0x0c, 0x00, 0x06, 0x00, 0x03], "a/b", Bytes[0x00, 0x03], "c/d"
+        ).to_slice)
+      end
+
+      it "should parse a packet" do
+        io = combine(
+          Bytes[0xa2, 0x0c, 0x00, 0x05, 0x00, 0x03], "a/b", Bytes[0x00, 0x03], "c/d"
+        )
+
+        # Grab the packet type
+        case MQTT.peek_type(io)
+        when RequestType::Unsubscribe
+          unsub = io.read_bytes Unsubscribe
+          unsub.message_id.should eq(5)
+          unsub.topics.should eq(["a/b", "c/d"])
+        else
+          raise "incorrect packet type"
+        end
+      end
+    end
   end # describe MQTT::V3
 end   # MQTT::V3
