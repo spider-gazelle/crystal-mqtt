@@ -82,18 +82,18 @@ module MQTT
   end
 
   # Super-class for other MQTT related exceptions
-  class Exception < ::Exception
+  class Error < ::Exception
   end
 
   # A ProtocolException will be raised if there is a
   # problem with data received from a remote host
-  class ProtocolException < ::MQTT::Exception
+  class ProtocolError < ::MQTT::Error
   end
 
   # A NotConnectedException will be raised when trying to
   # perform a function but no connection has been
   # established
-  class NotConnectedException < ::MQTT::Exception
+  class NotConnectedError < ::MQTT::Error
   end
 
   # MQTT-SN
@@ -103,7 +103,7 @@ module MQTT
 
     # A ProtocolException will be raised if there is a
     # problem with data received from a remote host
-    class ProtocolException < ::MQTT::Exception
+    class ProtocolError < ::MQTT::Error
     end
   end
 end

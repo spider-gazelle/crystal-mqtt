@@ -1,20 +1,14 @@
-require "../../mqtt"
-require "tokenizer"
+require "../transport"
 require "promise"
-require "openssl"
 require "mutex"
 
 module MQTT
   module V3
     # https://test.mosquitto.org/
     class Client
-      property host : String = ""
-      property port : Int32 = MQTT::DEFAULT_PORT
-      property tls_context : OpenSSL::SSL::Context::Client? = nil
       getter last_ping_response : Time? = nil
 
       @message_lock = Mutex.new
-
       @message_id = 0_u16
 
       protected def next_message_id
@@ -26,12 +20,7 @@ module MQTT
       @waiting_suback = {} of UInt16 => Promise::DeferredPromise(Suback)
       @waiting_connect : Promise::DeferredPromise(Connack)? = nil
 
-      @socket : IO? = nil
-
-      def initialize(@host, @port = MQTT::DEFAULT_PORT, @tls_context = nil)
-        # Check for a complete message
-        @tokenizer = Tokenizer::Abstract.new { |buffer| tokenize(buffer) }
-
+      def initialize(@transport : Transport)
         # Configure the subscription callback config
         @subscription_qos = {} of String => QoS
         @subscription_cbs = Hash(String, Array(Proc(String, Bytes, Nil))).new do |h, k|
@@ -40,15 +29,21 @@ module MQTT
 
         # Closes when the socket disconnects
         @wait_close = Channel(Nil).new
-        @wait_close.close
+
+        # Hook up transport
+        @transport.on_close do
+          on_close(@transport.error)
+          nil
+        end
+
+        @transport.on_tokenize { |buffer| tokenize(buffer) }
+
+        @transport.on_message do |data|
+          parse_message(IO::Memory.new(data))
+          nil
+        end
 
         spawn { self.process_requests! }
-      end
-
-      # Returns once the MQTT connection has terminated
-      def wait_close : Nil
-        channel = @message_lock.synchronize { @wait_close }
-        channel.receive? unless channel.closed?
       end
 
       protected def tokenize(buffer : IO::Memory) : Int32
@@ -59,6 +54,32 @@ module MQTT
         rescue
           -1
         end
+      end
+
+      protected def on_close(error : ::Exception?)
+        # Clean up the connection state here
+        if error
+          Log.error(exception: error) { "Socket closed, error consuming IO\n#{error.inspect_with_backtrace}" }
+        else
+          Log.debug { "Socket closed, stopped processing incoming messages." }
+        end
+
+        error = IO::Error.new("Socket closed, stopped processing incoming messages.")
+        @message_lock.synchronize do
+          @waiting_connect.try &.reject(error)
+          @waiting_connect = nil
+          @waiting_suback.each_value { |value| value.reject(error) }
+          @waiting_suback.clear
+          @waiting_ack.each_value { |value| value.reject(error) }
+          @waiting_ack.clear
+          @wait_close.close
+        end
+      end
+
+      # Returns once the MQTT connection has terminated
+      def wait_close : Nil
+        channel = @message_lock.synchronize { @wait_close }
+        channel.receive? unless channel.closed?
       end
 
       # NOTE:: Unsubscribe is the same class as Subscribe
@@ -74,13 +95,11 @@ module MQTT
           # nil if the channel was closed
           break unless received
           packet, promise = received
-          socket = @socket
 
           begin
-            if socket && !socket.closed?
+            if !@transport.closed?
               Log.debug { "writing packet: #{packet.inspect}" }
-              socket.write_bytes(packet)
-              socket.flush
+              @transport.send(packet)
 
               # If not expecting a response we'll resolve it after sending
               if promise.is_a?(Promise::DeferredPromise(Bool))
@@ -89,25 +108,21 @@ module MQTT
                 # TODO:: implement timeouts
               end
             else
-              promise.reject(NotConnectedException.new("socket closed"))
+              promise.reject(NotConnectedError.new("socket closed"))
             end
           rescue e : IO::Error
-            promise.reject(Exception.new("IO error", e)) if promise
+            promise.reject(Error.new("IO error", e)) if promise
           rescue e
             Log.error(exception: e) { "error processing request #{packet.id}" }
-            promise.reject(Exception.new("unexpected error", e)) if promise
+            promise.reject(Error.new("unexpected error", e)) if promise
           end
         end
       ensure
         Log.debug { "request processing has stopped" }
       end
 
-      def connected?
-        if socket = @socket
-          !socket.closed?
-        else
-          false
-        end
+      def closed?
+        @transport.closed?
       end
 
       def connect(
@@ -115,24 +130,11 @@ module MQTT
         password : String? = nil,
         keep_alive : Int32 = 60,
         client_id : String = MQTT.generate_client_id,
-        clean_start : Bool = true,
-        dns_timeout : Int32 = 10,
-        connect_timeout : Int32 = 10
+        clean_start : Bool = true
       )
-        return @waiting_connect.not_nil!.get if connected?
-
-        # Connect to the server
-        @socket = socket = TCPSocket.new(@host, @port, dns_timeout, connect_timeout)
-        socket.tcp_nodelay = true
-
-        if tls = @tls_context
-          # Sync true so TLS negotiation works
-          socket.sync = true
-          @socket = OpenSSL::SSL::Socket::Client.new(socket, context: tls, sync_close: true, hostname: @host)
+        if connecting = @waiting_connect
+          return connecting.get
         end
-        socket.sync = false
-
-        spawn { process! }
 
         # Negotiate the MQTT layer
         connect = Connect.new
@@ -147,18 +149,16 @@ module MQTT
         Log.debug { "TCP connection established, sending connect packet" }
 
         promise = Promise::DeferredPromise(Connack).new
-        @message_lock.synchronize do
-          @waiting_connect = promise
-          @wait_close = Channel(Nil).new
-        end
+        @message_lock.synchronize { @waiting_connect = promise }
         @processor.send({connect, promise})
+
         ack = promise.get
-        socket.close unless ack.success?
+        @transport.close! unless ack.success?
         ack
       end
 
-      def disconnect(send_msg = true)
-        return unless connected?
+      def disconnect(send_msg = true) : Nil
+        return if closed?
 
         if send_msg
           disconnect = Disconnect.new
@@ -166,12 +166,15 @@ module MQTT
           disconnect.packet_length = disconnect.calculate_length
 
           promise = Promise::DeferredPromise(Bool).new
-          @processor.send({connect, promise})
-          promise.get
+          @processor.send({disconnect, promise})
+          begin
+            promise.get
+          rescue
+            # ignore failures here, we'll just close the transport
+          end
         end
 
-        @socket.try &.close
-        self
+        @transport.close!
       end
 
       def publish(topic : String, payload = "", retain : Bool = false, qos : QoS = QoS::FireAndForget)
@@ -202,7 +205,7 @@ module MQTT
       end
 
       # http://www.steves-internet-guide.com/understanding-mqtt-topics/
-      def subscribe(topics : Hash(String, Tuple(QoS, Proc(String, Bytes, Nil)))) : Nil
+      def subscribe(topics : Hash(String, Tuple(QoS, Proc(String, Bytes, Nil))))
         # Build the message
         sub = Subscribe.new
         sub.id = MQTT::RequestType::Subscribe
@@ -272,6 +275,8 @@ module MQTT
             end
           end
         end
+
+        self
       end
 
       def subscribe(*topics, qos : QoS = QoS::FireAndForget, &callback : Proc(String, Bytes, Nil))
@@ -280,6 +285,7 @@ module MQTT
           mapped_topics[topic] = {qos, callback}
         end
         subscribe(mapped_topics)
+        self
       end
 
       def unsubscribe(*topics)
@@ -291,6 +297,7 @@ module MQTT
           end
         end
         perform_unsubscribe(topics)
+        self
       end
 
       def unsubscribe(topic : String, callback : Proc(String, Bytes, Nil))
@@ -306,6 +313,7 @@ module MQTT
           end
         end
         perform_unsubscribe([topic]) if found
+        self
       end
 
       protected def perform_unsubscribe(topics : Array(String)) : Nil
@@ -333,52 +341,6 @@ module MQTT
         promise = Promise::DeferredPromise(Bool).new
         @processor.send({ping, promise})
         promise.get
-      end
-
-      def disconnect : Nil
-        packet = Disconnect.new
-        packet.id = MQTT::RequestType::Disconnect
-        packet.packet_length = packet.calculate_length
-
-        promise = Promise::DeferredPromise(Bool).new
-        @processor.send({packet, promise})
-        promise.get
-
-        @socket.try &.close
-      end
-
-      # Incomming messages are processed here
-      # The message is then processed on a new thread
-      protected def process!
-        Log.debug { "Processing incoming messages..." }
-
-        raw_data = Bytes.new(2048)
-        if socket = @socket
-          while !socket.closed?
-            bytes_read = socket.read(raw_data)
-            break if bytes_read == 0 # IO was closed
-
-            @tokenizer.extract(raw_data[0, bytes_read]).each do |bytes|
-              spawn { parse_message(IO::Memory.new(bytes)) }
-            end
-          end
-        end
-      rescue IO::Error
-      rescue error
-        Log.error(exception: error) { "error consuming IO\n#{error.inspect_with_backtrace}" }
-      ensure
-        # Clean up the connection state here
-        Log.debug { "Socket closed, stopped processing incoming messages." }
-        error = IO::Error.new("Socket closed, stopped processing incoming messages.")
-        @message_lock.synchronize do
-          @waiting_connect.try &.reject(error)
-          @waiting_connect = nil
-          @waiting_suback.each_value { |value| value.reject(error) }
-          @waiting_suback.clear
-          @waiting_ack.each_value { |value| value.reject(error) }
-          @waiting_ack.clear
-          @wait_close.close
-        end
       end
 
       def parse_message(io)
@@ -425,7 +387,7 @@ module MQTT
         end
       rescue e
         Log.error(exception: e) { "failed to parse message: #{io.to_slice}" }
-        @socket.try &.close if @waiting_connect
+        @transport.close!
       end
 
       def publish_received(pub)

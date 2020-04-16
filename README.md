@@ -3,7 +3,7 @@
 
 # Crystal MQTT
 
-A MQTT communication library for crystal lang
+A MQTT communication library for crystal lang with pluggable transports
 
 
 ## Installation
@@ -24,15 +24,13 @@ A MQTT communication library for crystal lang
 ```crystal
 require "mqtt/v3/client"
 
-# Create a client
-client = MQTT::V3::Client.new("test.mosquitto.org", 8883)
-
-# Configure TLS if the transport is secure
+# Create a transport (TCP, UDP, Websocket etc)
 tls = OpenSSL::SSL::Context::Client.new
 tls.verify_mode = OpenSSL::SSL::VerifyMode::NONE
-client.tls_context = tls
+transport = MQTT::Transport::TCP.new("test.mosquitto.org", 8883, tls)
 
-# Establish a connection
+# Establish a MQTT connection
+client = MQTT::V3::Client.new(transport)
 client.connect
 
 # Perform some actions

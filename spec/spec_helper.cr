@@ -1,5 +1,6 @@
 require "spec"
 require "../src/mqtt"
+require "../src/mqtt/v3/client"
 
 def combine(*args)
   io = IO::Memory.new
