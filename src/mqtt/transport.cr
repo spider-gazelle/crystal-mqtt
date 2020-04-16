@@ -12,11 +12,11 @@ module MQTT
     @on_close : Proc(Nil)?
     getter error : ::Exception? = nil
 
-    def on_message(&on_message : Bytes -> ) : Nil
+    def on_message(&on_message : Bytes ->) : Nil
       @on_message = on_message
     end
 
-    def on_close(&on_close : -> )
+    def on_close(&on_close : ->)
       @on_close = on_close
     end
 
