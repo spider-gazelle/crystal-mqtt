@@ -24,7 +24,11 @@ module MQTT
       end
 
       def payload=(message)
-        @payload = message.to_slice
+        if message.nil?
+          @payload = Bytes.new(0)
+        else
+          @payload = message.to_slice
+        end
       end
     end
   end # V3
