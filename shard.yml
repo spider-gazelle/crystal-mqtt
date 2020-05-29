@@ -1,8 +1,9 @@
 name: mqtt
-version: 1.0.0
+version: 1.0.1
 
 authors:
   - Stephen von Takach <steve@vontaka.ch>
+  - Caspian Baska <caspian@place.tech>
 
 dependencies:
   bindata:
