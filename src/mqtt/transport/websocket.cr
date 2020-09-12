@@ -24,6 +24,9 @@ module MQTT
 
     def send(message) : Nil
       @socket.send(message.to_slice)
+    rescue error : IO::Error
+      @socket.close
+      raise error
     end
 
     @socket : HTTP::WebSocket

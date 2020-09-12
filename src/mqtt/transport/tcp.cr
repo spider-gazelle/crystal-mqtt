@@ -37,6 +37,9 @@ module MQTT
     def send(message) : Nil
       @socket.write_bytes(message)
       @socket.flush
+    rescue error : IO::Error
+      @socket.close
+      raise error
     end
 
     @socket : IO
