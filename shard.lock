@@ -2,11 +2,11 @@ version: 2.0
 shards:
   ameba:
     git: https://github.com/crystal-ameba/ameba.git
-    version: 0.13.2
+    version: 0.13.4
 
   bindata:
     git: https://github.com/spider-gazelle/bindata.git
-    version: 1.5.6
+    version: 1.8.1
 
   cron_parser:
     git: https://github.com/kostya/cron_parser.git
@@ -22,7 +22,7 @@ shards:
 
   tasker:
     git: https://github.com/spider-gazelle/tasker.git
-    version: 2.0.1
+    version: 2.0.2
 
   tokenizer:
     git: https://github.com/spider-gazelle/tokenizer.git
