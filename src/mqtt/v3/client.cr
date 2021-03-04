@@ -425,7 +425,8 @@ module MQTT
 
       # Based on https://github.com/ralphtheninja/mqtt-match/blob/master/index.js
       def topic_matches(filter : String, topic : String)
-        filter_array = filter.split("/")
+        #remove any MQTT shared subscription prefix
+        filter_array = filter.sub(/^\$[^\/]+\/[^\/]+\//, "").split("/")
         topic_array = topic.split("/")
         length = filter_array.size
 
