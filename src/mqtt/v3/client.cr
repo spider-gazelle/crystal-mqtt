@@ -432,7 +432,7 @@ module MQTT
         end
 
         @subscription_cbs.each do |filter, callbacks|
-          if topic_matches(filter, topic)
+          if MQTT::V3::Client.topic_matches(filter, topic)
             callbacks.each do |callback|
               begin
                 callback.call(topic, payload)
