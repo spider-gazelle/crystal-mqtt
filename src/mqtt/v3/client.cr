@@ -11,6 +11,27 @@ module MQTT
       @message_lock = Mutex.new
       @message_id = 0_u16
 
+      # Based on https://github.com/ralphtheninja/mqtt-match/blob/master/index.js
+      def self.topic_matches(filter : String, topic : String)
+        filter_array = filter.split("/")
+        filter_array = filter_array[2..-1] if filter_array.first.starts_with?("$")  #remove any MQTT shared subscription prefix
+        topic_array = topic.split("/")
+        length = filter_array.size
+
+        # Normalise the strings
+        filter_array.shift if filter_array[0].empty?
+        topic_array.shift if topic_array[0].empty?
+
+        filter_array.each_with_index do |left, index|
+          right = topic_array[index]?
+
+          return (topic_array.size >= (length - 1)) if left == "#"
+          return false if left != "+" && left != right
+        end
+
+        topic_array.size == length
+      end
+
       protected def next_message_id
         # Allow overflows
         @message_id = @message_id &+ 1
@@ -421,27 +442,6 @@ module MQTT
             end
           end
         end
-      end
-
-      # Based on https://github.com/ralphtheninja/mqtt-match/blob/master/index.js
-      def topic_matches(filter : String, topic : String)
-        #remove any MQTT shared subscription prefix
-        filter_array = filter.sub(/^\$[^\/]+\/[^\/]+\//, "").split("/")
-        topic_array = topic.split("/")
-        length = filter_array.size
-
-        # Normalise the strings
-        filter_array.shift if filter_array[0].empty?
-        topic_array.shift if topic_array[0].empty?
-
-        filter_array.each_with_index do |left, index|
-          right = topic_array[index]?
-
-          return (topic_array.size >= (length - 1)) if left == "#"
-          return false if left != "+" && left != right
-        end
-
-        topic_array.size == length
       end
     end # Client
   end   # V3
