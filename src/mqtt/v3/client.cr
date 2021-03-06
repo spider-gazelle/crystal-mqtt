@@ -11,6 +11,29 @@ module MQTT
       @message_lock = Mutex.new
       @message_id = 0_u16
 
+      # Based on https://github.com/ralphtheninja/mqtt-match/blob/master/index.js
+      def self.topic_matches(filter : String, topic : String)
+        filter_array = filter.split("/")
+        # remove any MQTT shared subscription prefix
+        # https://emqx.medium.com/introduction-to-mqtt-5-0-protocol-shared-subscription-4c23e7e0e3c1
+        filter_array = filter_array[2..-1] if filter_array.first? == "$share"
+        topic_array = topic.split("/")
+        length = filter_array.size
+
+        # Normalise the strings
+        filter_array.shift if filter_array[0].empty?
+        topic_array.shift if topic_array[0].empty?
+
+        filter_array.each_with_index do |left, index|
+          right = topic_array[index]?
+
+          return (topic_array.size >= (length - 1)) if left == "#"
+          return false if left != "+" && left != right
+        end
+
+        topic_array.size == length
+      end
+
       protected def next_message_id
         # Allow overflows
         @message_id = @message_id &+ 1
@@ -411,7 +434,7 @@ module MQTT
         end
 
         @subscription_cbs.each do |filter, callbacks|
-          if topic_matches(filter, topic)
+          if MQTT::V3::Client.topic_matches(filter, topic)
             callbacks.each do |callback|
               begin
                 callback.call(topic, payload)
@@ -421,26 +444,6 @@ module MQTT
             end
           end
         end
-      end
-
-      # Based on https://github.com/ralphtheninja/mqtt-match/blob/master/index.js
-      def topic_matches(filter : String, topic : String)
-        filter_array = filter.split("/")
-        topic_array = topic.split("/")
-        length = filter_array.size
-
-        # Normalise the strings
-        filter_array.shift if filter_array[0].empty?
-        topic_array.shift if topic_array[0].empty?
-
-        filter_array.each_with_index do |left, index|
-          right = topic_array[index]?
-
-          return (topic_array.size >= (length - 1)) if left == "#"
-          return false if left != "+" && left != right
-        end
-
-        topic_array.size == length
       end
     end # Client
   end   # V3
