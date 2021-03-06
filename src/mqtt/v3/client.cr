@@ -14,7 +14,9 @@ module MQTT
       # Based on https://github.com/ralphtheninja/mqtt-match/blob/master/index.js
       def self.topic_matches(filter : String, topic : String)
         filter_array = filter.split("/")
-        filter_array = filter_array[2..-1] if filter_array.first.starts_with?("$")  #remove any MQTT shared subscription prefix
+        # remove any MQTT shared subscription prefix
+        # https://emqx.medium.com/introduction-to-mqtt-5-0-protocol-shared-subscription-4c23e7e0e3c1
+        filter_array = filter_array[2..-1] if filter_array.first? == "$share"
         topic_array = topic.split("/")
         length = filter_array.size
 
