@@ -91,9 +91,9 @@ module MQTT
         @message_lock.synchronize do
           @waiting_connect.try &.reject(error)
           @waiting_connect = nil
-          @waiting_suback.each_value { |value| value.reject(error) }
+          @waiting_suback.each_value &.reject(error)
           @waiting_suback.clear
-          @waiting_ack.each_value { |value| value.reject(error) }
+          @waiting_ack.each_value &.reject(error)
           @waiting_ack.clear
           @wait_close.close
         end
@@ -304,7 +304,7 @@ module MQTT
 
       def subscribe(*topics, qos : QoS = QoS::FireAndForget, &callback : Proc(String, Bytes, Nil))
         mapped_topics = {} of String => Tuple(QoS, Proc(String, Bytes, Nil))
-        topics.to_a.flatten.map(&.to_s).uniq.each do |topic|
+        topics.to_a.flatten.map(&.to_s).uniq!.each do |topic|
           mapped_topics[topic] = {qos, callback}
         end
         subscribe(mapped_topics)
@@ -312,7 +312,7 @@ module MQTT
       end
 
       def unsubscribe(*topics)
-        topics = topics.to_a.flatten.map(&.to_s).uniq
+        topics = topics.to_a.flatten.map(&.to_s).uniq!
         @message_lock.synchronize do
           topics.each do |topic|
             @subscription_cbs.delete(topic)
