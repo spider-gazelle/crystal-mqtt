@@ -1,7 +1,6 @@
-[![Build Status](https://travis-ci.com/spider-gazelle/crystal-mqtt.svg?branch=master)](https://travis-ci.com/github/spider-gazelle/crystal-mqtt)
-
-
 # Crystal MQTT
+
+[![CI](https://github.com/spider-gazelle/mqtt/actions/workflows/ci.yml/badge.svg)](https://github.com/spider-gazelle/mqtt/actions/workflows/ci.yml)
 
 A MQTT communication library for crystal lang with pluggable transports
 
