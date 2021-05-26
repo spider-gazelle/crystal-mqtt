@@ -1,6 +1,6 @@
 # Crystal MQTT
 
-[![CI](https://github.com/spider-gazelle/mqtt/actions/workflows/ci.yml/badge.svg)](https://github.com/spider-gazelle/mqtt/actions/workflows/ci.yml)
+[![CI](https://github.com/spider-gazelle/crystal-mqtt/actions/workflows/ci.yml/badge.svg)](https://github.com/spider-gazelle/crystal-mqtt/actions/workflows/ci.yml)
 
 A MQTT communication library for crystal lang with pluggable transports
 
