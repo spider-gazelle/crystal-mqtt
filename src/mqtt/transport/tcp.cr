@@ -17,11 +17,8 @@ module MQTT
       socket.tcp_nodelay = true
 
       if tls = tls_context
-        # Sync true so TLS negotiation works
-        socket.sync = true
         @socket = OpenSSL::SSL::Socket::Client.new(socket, context: tls, sync_close: true, hostname: host)
       end
-      socket.sync = false
 
       spawn { process! }
     end
