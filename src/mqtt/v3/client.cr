@@ -153,7 +153,12 @@ module MQTT
         password : String? = nil,
         keep_alive : Int32 = 60,
         client_id : String = MQTT.generate_client_id,
-        clean_start : Bool = true
+        clean_start : Bool = true,
+        will_flag : Bool = false,
+        will_qos : Int32 = 0,
+        will_retain : Bool = false,
+        will_topic : String? = nil,
+        will_payload : String? = nil
       )
         if connecting = @waiting_connect
           return connecting.get
@@ -164,9 +169,14 @@ module MQTT
         connect.id = MQTT::RequestType::Connect
         connect.keep_alive_seconds = keep_alive.to_u16
         connect.client_id = client_id
-        connect.clean_start = true
+        connect.clean_start = clean_start
         connect.username = username if username
         connect.password = password if password
+        connect.will_flag = will_flag
+        connect.will_qos = QoS.from_value(will_qos)
+        connect.will_retain = will_retain
+        connect.will_topic = will_topic if will_topic
+        connect.will_payload = will_payload if will_payload
         connect.packet_length = connect.calculate_length
 
         Log.debug { "TCP connection established, sending connect packet" }
