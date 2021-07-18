@@ -173,7 +173,7 @@ module MQTT
         connect.username = username if username
         connect.password = password if password
         connect.will_flag = will_flag
-        connect.will_qos = QoS.from_value(will_qos)
+        connect.will_qos = will_qos.is_a?(QoS) ? will_qos : QoS.from_value(will_qos)
         connect.will_retain = will_retain
         connect.will_topic = will_topic if will_topic
         connect.will_payload = will_payload if will_payload
