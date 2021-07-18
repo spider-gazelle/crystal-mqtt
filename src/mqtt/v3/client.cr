@@ -155,7 +155,7 @@ module MQTT
         client_id : String = MQTT.generate_client_id,
         clean_start : Bool = true,
         will_flag : Bool = false,
-        will_qos : Int32 | QoS  = 0,
+        will_qos : Int32 | QoS = 0,
         will_retain : Bool = false,
         will_topic : String? = nil,
         will_payload : String? = nil
