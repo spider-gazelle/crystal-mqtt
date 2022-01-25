@@ -18,11 +18,11 @@ module MQTT
         # https://emqx.medium.com/introduction-to-mqtt-5-0-protocol-shared-subscription-4c23e7e0e3c1
         filter_array = filter_array[2..-1] if filter_array.first? == "$share"
         topic_array = topic.split("/")
-        length = filter_array.size
 
         # Normalise the strings
-        filter_array.shift if filter_array[0].empty?
         topic_array.shift if topic_array[0].empty?
+        filter_array.shift if filter_array[0].empty?
+        length = filter_array.size
 
         filter_array.each_with_index do |left, index|
           right = topic_array[index]?

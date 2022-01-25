@@ -1,5 +1,5 @@
 name: mqtt
-version: 1.2.0
+version: 1.2.1
 crystal: ">= 0.36.1"
 
 authors:
