@@ -22,7 +22,7 @@ module MQTT
     {% end %}
   end
 
-  enum Version
+  enum Version : UInt8
     V31  = 3
     V311
     V5
@@ -67,7 +67,7 @@ module MQTT
   end
 
   # https://makerdemy.com/what-is-quality-of-service-in-mqtt/
-  enum QoS
+  enum QoS : UInt8
     FireAndForget       = 0
     BrokerReceived
     SubscribersReceived

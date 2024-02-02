@@ -12,7 +12,7 @@ module MQTT
       end
 
       # The return code (defaults to 0 for connection accepted)
-      uint8 :return_code
+      field return_code : UInt8
 
       def calculate_length : UInt32
         2_u32

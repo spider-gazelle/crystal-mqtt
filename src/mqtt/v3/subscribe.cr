@@ -6,7 +6,7 @@ module MQTT
       endian big
 
       MQTT.string filter
-      enum_field UInt8, qos : QoS = QoS::FireAndForget
+      field qos : QoS = QoS::FireAndForget
 
       def bytesize
         # Size of string + string length + qos
@@ -19,11 +19,11 @@ module MQTT
 
       # NOTE:: `qos` should be `BrokerReceived`
 
-      uint16 :message_id
+      field message_id : UInt16
 
       # Will continue reading data into the array until the
       #  sum of the topics array + 2 message_id bytes equals the total size
-      variable_array topics : SubTopic, read_next: ->{
+      field topics : Array(SubTopic), read_next: ->{
         calculate_length < packet_length
       }
 

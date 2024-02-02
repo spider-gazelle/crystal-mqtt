@@ -7,10 +7,10 @@ module MQTT
 
       # The topic name to publish to
       MQTT.string topic
-      uint16 :message_id, onlyif: ->{ qos? }
+      field message_id : UInt16, onlyif: ->{ qos? }
 
       # The data to be published
-      bytes :payload, length: ->{
+      field payload : Bytes, length: ->{
         len = packet_length - (topic.bytesize + 2)
         len -= 2 if qos?
         len

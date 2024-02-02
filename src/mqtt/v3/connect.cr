@@ -10,7 +10,7 @@ module MQTT
       MQTT.string name, default: Version::V311.connect_name
 
       # The version number of the protocol
-      enum_field UInt8, version : Version = Version::V311
+      field version : Version = Version::V311
 
       bit_field do
         bool has_username
@@ -18,7 +18,7 @@ module MQTT
         # Set to true to make the Will message retained
         bool will_retain
         # The QoS level to send the Will message as
-        enum_bits 2, will_qos : QoS = QoS::FireAndForget
+        bits 2, will_qos : QoS = QoS::FireAndForget
         # flag to indicate if the will topic will be set
         bool will_flag
         # Set to false to keep a persistent session with the server
@@ -27,7 +27,7 @@ module MQTT
         bits 1, :_reserved_
       end
 
-      uint16 :keep_alive_seconds
+      field keep_alive_seconds : UInt16
 
       # The client identifier string
       # NOTE:: Max size == 23 bytes for V3.1 (empty is not allowed)

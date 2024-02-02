@@ -18,11 +18,11 @@ module MQTT
 
       # NOTE:: `qos` should be `BrokerReceived`
 
-      uint16 :message_id
+      field message_id : UInt16
 
       # Will continue reading data into the array until the
       #  sum of the topics array + 2 message_id bytes equals the total size
-      variable_array topics : UnsubTopic, read_next: ->{
+      field topics : Array(UnsubTopic), read_next: ->{
         calculate_length < packet_length
       }
 

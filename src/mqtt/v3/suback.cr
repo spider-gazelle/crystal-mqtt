@@ -5,8 +5,8 @@ module MQTT
     class Suback < Header
       endian big
 
-      uint16 :message_id
-      variable_array raw_return_codes : UInt8, read_next: ->{
+      field message_id : UInt16
+      field raw_return_codes : Array(UInt8), read_next: ->{
         calculate_length < packet_length
       }
 

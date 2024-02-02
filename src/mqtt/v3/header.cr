@@ -8,15 +8,15 @@ module MQTT
       endian big
 
       bit_field do
-        enum_bits 4, id : RequestType = RequestType::Connect
+        bits 4, id : RequestType = RequestType::Connect
         bool duplicate
-        enum_bits 2, qos : QoS = QoS::FireAndForget
+        bits 2, qos : QoS = QoS::FireAndForget
         bool retain
       end
-      uint8 :variable_length1
-      uint8 :variable_length2, onlyif: ->{ variable_length1 & 0x80 > 0 }
-      uint8 :variable_length3, onlyif: ->{ variable_length2 & 0x80 > 0 }
-      uint8 :variable_length4, onlyif: ->{ variable_length3 & 0x80 > 0 }
+      field variable_length1 : UInt8
+      field variable_length2 : UInt8, onlyif: ->{ variable_length1 & 0x80 > 0 }
+      field variable_length3 : UInt8, onlyif: ->{ variable_length2 & 0x80 > 0 }
+      field variable_length4 : UInt8, onlyif: ->{ variable_length3 & 0x80 > 0 }
 
       # invalid packet size to indicate if cached
       @packet_length : UInt32 = 0xFFFFFFFF

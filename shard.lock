@@ -1,0 +1,18 @@
+version: 2.0
+shards:
+  ameba:
+    git: https://github.com/crystal-ameba/ameba.git
+    version: 1.6.1
+
+  bindata:
+    git: https://github.com/spider-gazelle/bindata.git
+    version: 2.0.0
+
+  promise:
+    git: https://github.com/spider-gazelle/promise.git
+    version: 3.0.0
+
+  tokenizer:
+    git: https://github.com/spider-gazelle/tokenizer.git
+    version: 1.1.1
+

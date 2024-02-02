@@ -5,7 +5,7 @@ module MQTT
     class Ack < Header
       endian big
 
-      uint16 :message_id
+      field message_id : UInt16
 
       def calculate_length : UInt32
         2_u32
