@@ -11,8 +11,8 @@ module MQTT
   DEFAULT_SSL_PORT = 8883
 
   macro string(name, onlyif = nil, default = nil, &block)
-    uint16 :{{name.id}}_size, value: ->{ {{name.id}}.bytesize }, onlyif: {{onlyif}}
-    string :{{name.id}}, length: ->{ {{name.id}}_size }, onlyif: {{onlyif}}, default: {{default}}
+    field {{name.id}}_size : UInt16, value: ->{ {{name.id}}.bytesize }, onlyif: {{onlyif}}
+    field {{name.id}} : String = {{default}}, length: ->{ {{name.id}}_size }, onlyif: {{onlyif}}
 
     {% if block %}
       def {{name.id}}=(str : String)
