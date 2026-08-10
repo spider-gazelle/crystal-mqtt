@@ -69,6 +69,21 @@ module MQTT
         QoS.from_value?(value)
       end
 
+      # Whether reconnecting with the same settings could plausibly work.
+      # Authentication, identity and protocol failures will not, and a redirect
+      # wants us somewhere else entirely
+      def fatal? : Bool
+        case self
+        when .malformed_packet?, .protocol_error?, .unsupported_protocol_version?,
+             .client_identifier_not_valid?, .bad_user_name_or_password?, .not_authorized?,
+             .banned?, .bad_authentication_method?, .server_moved?, .use_another_server?,
+             .retain_not_supported?, .qo_s_not_supported?
+          true
+        else
+          false
+        end
+      end
+
       def description : String
         to_s.underscore.tr("_", " ")
       end

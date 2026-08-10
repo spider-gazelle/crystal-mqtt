@@ -211,6 +211,7 @@ module MQTT
     # second loop
     private def reconnect_wanted? : Bool
       return false if @terminated || @transport_factory.nil?
+      return false unless reconnect_permitted?
 
       @message_lock.synchronize do
         # nothing to re-establish until a connection has been made once
@@ -257,6 +258,12 @@ module MQTT
 
       @message_lock.synchronize { @reconnecting = false }
       terminate!
+    end
+
+    # Lets a subclass veto a reconnect, for example when the broker gave a
+    # reason that says not to come back
+    protected def reconnect_permitted? : Bool
+      true
     end
 
     # Replays whatever is needed to put the session back the way it was.

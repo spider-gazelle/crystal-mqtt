@@ -1,0 +1,16 @@
+# Broker for the end to end specs. Same image and config CI uses, so
+# `./test` behaves identically on a laptop and on a runner.
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./spec/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    healthcheck:
+      # the broker is only useful once it is actually accepting connections
+      test: ["CMD", "mosquitto_sub", "-h", "localhost", "-p", "1883", "-t", "$$SYS/#", "-C", "1", "-W", "2"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+      start_period: 2s

@@ -56,6 +56,8 @@ module MQTT
     Pingreq
     Pingresp
     Disconnect
+    # 5.0 only, enhanced authentication
+    Auth
 
     def requires_qos?
       self.in?({

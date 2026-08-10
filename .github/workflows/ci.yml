@@ -46,18 +46,14 @@ jobs:
     - name: Install dependencies
       run: shards install --ignore-crystal-version
     # a service container cannot be given a config file or a command override,
-    # and mosquitto 2.x refuses anonymous clients without one, so run it here
-    - name: Start mosquitto
-      run: |
-        apk add --no-cache mosquitto
-        mosquitto -c spec/mosquitto.conf -d
-        sleep 2
+    # and mosquitto 2.x refuses anonymous clients without one. `./test` starts
+    # the broker itself, so CI and a laptop run exactly the same path
+    - name: Install mosquitto
+      run: apk add --no-cache mosquitto bash
     # retained message persistence is broker side, so it only means anything
     # when tested against a real one
-    - name: Run tests against a real broker
-      run: crystal spec -v --error-trace
-      env:
-        MQTT_LIVE_BROKER: localhost
+    - name: Run the end to end suite
+      run: ./test
 
   multithreaded:
     runs-on: ubuntu-latest

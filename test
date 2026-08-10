@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+#
+# Runs the test suite, including the end to end specs that need a real broker.
+#
+#   ./test                 # spins a broker up, runs everything, tears it down
+#   ./test spec/v5_client_spec.cr
+#   MQTT_LIVE_BROKER=host ./test   # use a broker you already have
+#
+# Picks a broker in this order: one you nominated, a local mosquitto binary,
+# then docker compose. Falls back to running without the end to end specs,
+# which then report as pending rather than silently passing.
+set -euo pipefail
+
+cd "$(dirname "$0")"
+
+CLEANUP=()
+cleanup() {
+  for command in "${CLEANUP[@]:-}"; do
+    [ -n "$command" ] && eval "$command" >/dev/null 2>&1 || true
+  done
+}
+trap cleanup EXIT
+
+wait_for_broker() {
+  local host=$1 port=$2 attempts=${3:-30}
+  for _ in $(seq "$attempts"); do
+    if (exec 3<>"/dev/tcp/$host/$port") 2>/dev/null; then
+      exec 3>&- 2>/dev/null || true
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+start_broker() {
+  if [ -n "${MQTT_LIVE_BROKER:-}" ]; then
+    echo "==> using the broker at $MQTT_LIVE_BROKER:${MQTT_LIVE_PORT:-1883}"
+    return 0
+  fi
+
+  if command -v mosquitto >/dev/null 2>&1; then
+    echo "==> starting the local mosquitto binary"
+    mosquitto -c spec/mosquitto.conf -d
+    CLEANUP+=("pkill -f 'mosquitto -c spec/mosquitto.conf'")
+    export MQTT_LIVE_BROKER=localhost
+    wait_for_broker localhost 1883 15 && return 0
+    echo "!!! mosquitto did not come up" >&2
+    return 1
+  fi
+
+  local compose=""
+  if docker compose version >/dev/null 2>&1; then
+    compose="docker compose"
+  elif command -v docker-compose >/dev/null 2>&1; then
+    compose="docker-compose"
+  fi
+
+  if [ -n "$compose" ]; then
+    echo "==> starting mosquitto via $compose"
+    $compose up -d --wait mosquitto 2>/dev/null || $compose up -d mosquitto
+    CLEANUP+=("$compose down -v")
+    export MQTT_LIVE_BROKER=localhost
+    wait_for_broker localhost 1883 30 && return 0
+    echo "!!! the broker container did not become reachable" >&2
+    $compose logs mosquitto >&2 || true
+    return 1
+  fi
+
+  echo "!!! no broker available: install mosquitto or docker, or set MQTT_LIVE_BROKER" >&2
+  echo "    running without the end to end specs, they will report as pending" >&2
+  return 0
+}
+
+start_broker
+
+echo "==> crystal tool format --check"
+crystal tool format --check
+
+if [ -x ./bin/ameba ]; then
+  echo "==> ameba"
+  ./bin/ameba
+else
+  echo "==> skipping ameba, run 'shards build ameba' to enable it"
+fi
+
+echo "==> crystal spec ${*:-}"
+crystal spec -v --error-trace "$@"
