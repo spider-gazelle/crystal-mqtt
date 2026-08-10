@@ -28,6 +28,9 @@ An MQTT client for Crystal, supporting **3.1.1 and 5.0**, with pluggable transpo
 
 All three share the same transports, reconnection, keep alive and timeout behaviour.
 
+`require "mqtt"` brings in all of them; requiring a single client by path
+(`require "mqtt/v5/client"`) pulls in only what it needs.
+
 
 ## Usage
 

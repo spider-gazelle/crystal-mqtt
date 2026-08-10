@@ -154,3 +154,5 @@ module MQTT
 end
 
 require "./mqtt/v3/*"
+require "./mqtt/v5/*"
+require "./mqtt/client"

@@ -1,9 +1,32 @@
 # Changelog
 
-## 1.4.0
+## 2.0.0
 
-MQTT 5.0 support, alongside the existing 3.1.1 client. Additive — nothing in the
-3.1.1 API changed, and its specs were untouched throughout.
+MQTT 5.0 support, alongside the existing 3.1.1 client.
+
+### Upgrading from 1.2.3
+
+**1.3.0 was never released**, so everything listed under it below is part of this
+release as well. The 5.0 work is purely additive — the 3.1.1 API did not change
+and its specs were untouched throughout — but the 1.3.0 changes were not, and
+they are what makes this a major version:
+
+- The **`promise` dependency is gone**. `require "mqtt/v3/client"` no longer makes
+  `Promise` available, and the `Exception#cause=` setter it monkey patched onto
+  the standard library disappears with it — pass `cause` to the constructor.
+- The empty **`MQTT::SN`** module has been removed.
+- **`subscribe` raises on failure** instead of logging and returning as though it
+  had worked.
+- **Wildcards no longer match topics beginning with `$`** ([MQTT-4.7.2-1]).
+  Subscribe to `$SYS/#` explicitly for broker system topics.
+- **`ping` waits for the broker's `PINGRESP`** rather than returning once the
+  packet was written.
+- **Requests time out after 30 seconds by default**, where they previously waited
+  forever. Set `#timeout` to `nil` for the old behaviour.
+- **`connect(will_flag: true)` requires a `will_topic`.**
+- **Transports no longer open a socket in their constructor.** A connection
+  failure now surfaces from `Client.new`, wrapped in `MQTT::NotConnectedError`
+  with the socket error as its cause.
 
 ### Added
 
@@ -35,6 +58,9 @@ MQTT 5.0 support, alongside the existing 3.1.1 client. Additive — nothing in t
 - `./test` and `docker-compose.yml`. `./test` finds a broker — one you nominated,
   a local mosquitto, or docker compose — and is what CI runs, so a green run
   locally means a green run there.
+- `require "mqtt"` now brings in all three clients. It previously loaded only the
+  3.1.1 packets, so `MQTT::V5::Client` was undefined until you required it by
+  path.
 
 ### Changed
 
@@ -56,7 +82,7 @@ MQTT 5.0 support, alongside the existing 3.1.1 client. Additive — nothing in t
 - The end to end suite runs against real mosquitto on every CI build, including
   retained message persistence across separate connections.
 
-## 1.3.0
+## 1.3.0 — never released, included in 2.0.0
 
 Bug fixes and robustness work across the V3 client. The public API is unchanged
 except where noted under *Behavioural changes*.
