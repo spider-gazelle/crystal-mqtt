@@ -48,9 +48,21 @@ except where noted under *Behavioural changes*.
   fire exactly once, after every already-received message has been dispatched.
 - Transports began reading before the client had installed its callbacks.
   Consumption now starts explicitly, once the client is ready.
+- Transports no longer open a socket in their constructor. Connecting is deferred
+  to the client, which is what makes the ordering above possible and makes
+  reconnection feasible at all. A connection failure now surfaces from
+  `Client.new` rather than the transport constructor, wrapped in
+  `MQTT::NotConnectedError` with the socket error as its cause.
 
 ### Added
 
+- **Automatic reconnection.** `MQTT::V3::Client.new(reconnect: ...) { transport }`
+  takes a block that builds a transport, and re-establishes the connection when
+  it drops — replaying the CONNECT and restoring every subscription with its
+  callbacks intact. Backoff is controlled by `MQTT::Reconnect`. Subscriptions are
+  not re-sent when the broker reports `session_present`. `Client#terminated?`
+  reports whether the client is finished for good, as opposed to between
+  connections.
 - `MQTT::V3::Client#subscriptions` returns the QoS the broker actually granted
   for each active subscription — a broker may downgrade the level you asked for.
 - **Automatic keep-alive.** The client now sends `PINGREQ` when the link has been

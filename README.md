@@ -100,6 +100,42 @@ MQTT::Transport::TCP.new("test.mosquitto.org", read_timeout: 30, write_timeout: 
 ```
 
 
+## Reconnection
+
+Pass a block that builds a transport and the client will re-establish the
+connection whenever it drops, replaying the CONNECT and restoring every
+subscription with its callbacks intact. A socket cannot be reopened, so
+reconnection needs a factory rather than a single transport.
+
+```crystal
+client = MQTT::V3::Client.new(reconnect: MQTT::Reconnect.new) do
+  MQTT::Transport::TCP.new("test.mosquitto.org", 1883)
+end
+
+client.connect(client_id: "my-client")
+client.subscribe("sensors/#") { |topic, payload| handle(topic, payload) }
+# the subscription above survives a dropped connection
+```
+
+Delays back off exponentially and are capped:
+
+```crystal
+MQTT::Reconnect.new(
+  initial_delay: 1.second,
+  max_delay: 30.seconds,
+  max_attempts: nil, # nil retries forever
+)
+```
+
+If the broker reports `session_present` (which requires `clean_start: false`)
+the subscriptions are already held server side and are not sent again. When
+reconnection is exhausted, or you call `disconnect`, the client is `terminated?`
+and `wait_close` returns.
+
+Requests made while the connection is down fail with `MQTT::NotConnectedError` —
+messages are not queued for later delivery.
+
+
 ## Keep alive
 
 The client pings automatically whenever the link has been idle, at 75% of the
@@ -109,6 +145,19 @@ call `ping` yourself, or `keep_alive: 0` to disable it at the protocol level.
 
 ```crystal
 client.connect(keep_alive: 30)
+```
+
+
+## Transport lifecycle
+
+Constructing a transport does not open a socket; the client connects it once its
+own callbacks are in place, which is what stops data arriving before there is
+anything able to process it. A connection failure therefore surfaces from
+`Client.new`, not from the transport constructor.
+
+```crystal
+transport = MQTT::Transport::TCP.new("test.mosquitto.org", 1883) # no socket yet
+client = MQTT::V3::Client.new(transport)                         # connects here
 ```
 
 

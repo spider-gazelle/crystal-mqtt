@@ -1,14 +1,5 @@
 require "./spec_helper"
 
-# Yields until the condition holds, so specs don't depend on fiber scheduling
-def eventually(timeout : Time::Span = 2.seconds, &)
-  expire = Time.utc + timeout
-  until yield
-    raise "condition was not met within #{timeout}" if Time.utc > expire
-    sleep 1.millisecond
-  end
-end
-
 module MQTT::V3
   describe MQTT::V3::Client do
     describe "connecting" do

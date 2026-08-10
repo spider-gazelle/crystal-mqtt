@@ -198,7 +198,7 @@ Callers cannot distinguish a graceful disconnect from a broken pipe. The websock
 sets `@error` at all, and `spawn { socket.run }` (line 14) lets an exception escape into an unhandled
 fiber.
 
-### M8 — Callbacks are registered before the transport is wired up
+### M8 — Callbacks are registered before the transport is wired up (fully resolved in Phase 7)
 **Files:** `src/mqtt/transport/tcp.cr:26`, `websocket.cr:14`, `client.cr:56-69` · **Status:** Inspection · **Breaking:** API
 
 Both transports `spawn` their read loop inside the constructor, before `Client.new` has installed
@@ -284,9 +284,8 @@ automatic (H1), or that there are no timeouts (H2) — all things a user finds o
 All 27 issues are resolved as of v1.3.0 — see `tasks/todo.md` for the phase breakdown and
 `CHANGELOG.md` for the user-facing summary. Two were closed by decision rather than code:
 
-- **L6** — `ProtocolError` is now raised by the parse paths. The `MQTT::SN` stub was **kept**;
-  deleting the public `MQTT::SN::DEFAULT_PORT` / `MQTT::SN::ProtocolError` constants would be a
-  breaking change for no functional gain.
+- **L6** — `ProtocolError` is now raised by the parse paths, and the dead `MQTT::SN` stub has been
+  removed along with the `promise` dependency (see the CHANGELOG for the two transitive effects).
 - **L7** — the ameba dependency stays on `branch: master`; no tagged release supports Crystal 1.21
   yet. `shard.yml` now declares `crystal: ">= 1.2.0"` and CI covers that floor.
 

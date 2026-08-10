@@ -1,5 +1,6 @@
 require "../transport"
 require "../pending"
+require "../reconnect"
 require "mutex"
 
 module MQTT
@@ -88,35 +89,109 @@ module MQTT
       # whether a keep alive ping is required
       @last_activity : MQTT::Monotonic = MQTT.monotonic
 
+      # Everything we know about one topic filter. Kept together so a
+      # reconnection can replay the subscription exactly as it was requested
+      private class Subscription
+        property requested : QoS
+        property granted : QoS
+        getter callbacks : Array(Proc(String, Bytes, Nil))
+
+        def initialize(@requested : QoS, granted : QoS? = nil)
+          @granted = granted || @requested
+          @callbacks = [] of Proc(String, Bytes, Nil)
+        end
+      end
+
+      @subscriptions = {} of String => Subscription
+
+      # The arguments of the last successful `connect`, replayed on reconnect
+      @connect_options : NamedTuple(
+        username: String?,
+        password: String?,
+        keep_alive: Int32,
+        client_id: String,
+        clean_start: Bool,
+        will_flag: Bool,
+        will_qos: QoS,
+        will_retain: Bool,
+        will_topic: String?,
+        will_payload: (String | Bytes)?,
+        keep_alive_active: Bool)? = nil
+
+      # Builds a fresh transport when reconnecting. A socket cannot be reopened,
+      # so reconnection needs a factory rather than the transport itself
+      @transport_factory : Proc(Transport)?
+      @reconnect : MQTT::Reconnect?
+
+      # set once the client is finished for good, so a deliberate disconnect
+      # isn't mistaken for a dropped connection
+      @terminated : Bool = false
+      @reconnecting : Bool = false
+
+      # Drives the client over a single transport. The connection is not
+      # retried if it drops, see the block form for that
       def initialize(
-        @transport : Transport,
+        transport : Transport,
         @timeout : Time::Span? = DEFAULT_TIMEOUT,
         @max_packet_size : UInt32 = MQTT::DEFAULT_MAX_PACKET_SIZE,
       )
-        # Configure the subscription callback config
-        @subscription_qos = {} of String => QoS
-        @subscription_cbs = {} of String => Array(Proc(String, Bytes, Nil))
-
-        # Closes when the socket disconnects
+        @transport = transport
         @wait_close = Channel(Nil).new
 
-        # Hook up transport
-        @transport.on_close do
-          on_close(@transport.error)
+        spawn(name: "mqtt-requests") { process_requests! }
+        attach(transport)
+      end
+
+      # Drives the client over transports produced by the block, re-establishing
+      # the connection (and its subscriptions) whenever it drops.
+      #
+      # ```
+      # client = MQTT::V3::Client.new(reconnect: MQTT::Reconnect.new) do
+      #   MQTT::Transport::TCP.new("test.mosquitto.org")
+      # end
+      # client.connect
+      # ```
+      def initialize(
+        @timeout : Time::Span? = DEFAULT_TIMEOUT,
+        @max_packet_size : UInt32 = MQTT::DEFAULT_MAX_PACKET_SIZE,
+        reconnect : MQTT::Reconnect = MQTT::Reconnect.new,
+        &factory : -> Transport
+      )
+        @transport_factory = factory
+        @reconnect = reconnect
+        @transport = factory.call
+        @wait_close = Channel(Nil).new
+
+        spawn(name: "mqtt-requests") { process_requests! }
+        attach(@transport)
+      end
+
+      @transport : Transport
+
+      # Wires our callbacks up before the transport is allowed to produce data
+      protected def attach(transport : Transport) : Nil
+        transport.on_close do
+          on_close(transport.error)
           nil
         end
 
-        @transport.on_tokenize { |buffer| tokenize(buffer) }
+        transport.on_tokenize { |buffer| tokenize(buffer) }
 
-        @transport.on_message do |data|
+        transport.on_message do |data|
           parse_message(IO::Memory.new(data))
           nil
         end
 
-        spawn(name: "mqtt-requests") { process_requests! }
-
         # Only safe to consume data once the callbacks above are configured
-        @transport.start
+        begin
+          transport.start
+        rescue error : MQTT::Error
+          raise error
+        rescue error
+          # keeps the promise that everything raised here is an MQTT::Error,
+          # the underlying socket failure is preserved as the cause
+          raise NotConnectedError.new("failed to establish the transport connection", error)
+        end
       end
 
       protected def tokenize(buffer : IO::Memory) : Int32
@@ -177,9 +252,112 @@ module MQTT
         acks.each &.reject(failure)
         pings.each &.reject(failure)
 
-        # stops the request processor and wakes anything in `wait_close`
+        if reconnect_wanted?
+          spawn(name: "mqtt-reconnect") { reconnect! }
+        else
+          terminate!
+        end
+      end
+
+      # Whether the connection dropped in a way we should recover from. A
+      # deliberate `disconnect` is not one, and neither is a client that never
+      # got a transport factory.
+      # Claims the reconnect, so a transport closing mid-retry can't start a
+      # second loop
+      private def reconnect_wanted? : Bool
+        return false if @terminated || @transport_factory.nil?
+
+        @message_lock.synchronize do
+          # nothing to re-establish until a connection has been made once
+          next false if @reconnecting || @connect_options.nil?
+          @reconnecting = true
+        end
+      end
+
+      # Re-establishes the connection, and the session that was on it, using a
+      # fresh transport from the factory
+      protected def reconnect! : Nil
+        factory = @transport_factory
+        policy = @reconnect
+        return terminate! unless factory && policy
+
+        attempt = 0
+        loop do
+          attempt += 1
+          if policy.give_up?(attempt)
+            Log.error { "giving up reconnecting after #{attempt - 1} attempts" }
+            break
+          end
+
+          delay = policy.delay_for(attempt)
+          Log.info { "reconnecting in #{delay} (attempt #{attempt})" }
+          sleep delay
+          break if @terminated
+
+          begin
+            transport = factory.call
+            @transport = transport
+            attach(transport)
+            resume_session
+            Log.info { "reconnected after #{attempt} attempt(s)" }
+            @message_lock.synchronize { @reconnecting = false }
+            return
+          rescue error
+            Log.warn(exception: error) { "reconnect attempt #{attempt} failed" }
+            # the transport's own close will not start a competing retry,
+            # `@reconnecting` is still set
+            @transport.close! rescue nil
+          end
+        end
+
+        @message_lock.synchronize { @reconnecting = false }
+        terminate!
+      end
+
+      # Replays the CONNECT that established the session, and the subscriptions
+      # that were on it
+      protected def resume_session : Nil
+        options = @message_lock.synchronize { @connect_options }
+        raise Error.new("no connection to resume") unless options
+
+        ack = connect(**options)
+        ack.success!
+
+        # a broker that resumed our session already holds the subscriptions
+        if ack.session_present
+          Log.debug { "broker resumed the existing session" }
+        else
+          replay_subscriptions
+        end
+      end
+
+      protected def replay_subscriptions : Nil
+        filters = @message_lock.synchronize do
+          @subscriptions.transform_values(&.requested)
+        end
+        return if filters.empty?
+
+        Log.debug { "restoring #{filters.size} subscription(s)" }
+        ack = send_subscribe(filters, @timeout)
+
+        @message_lock.synchronize do
+          filters.each_key.with_index do |filter, index|
+            code = ack.raw_return_codes[index]
+            next if ack.failure?(code)
+            @subscriptions[filter]?.try &.granted = QoS.from_value(code)
+          end
+        end
+      end
+
+      # Stops the request processor and wakes anything in `wait_close`
+      protected def terminate! : Nil
+        @terminated = true
         @processor.close
         @wait_close.close
+      end
+
+      def terminated? : Bool
+        @terminated
       end
 
       # Returns once the MQTT connection has terminated
@@ -191,7 +369,7 @@ module MQTT
       # A broker is free to downgrade the level you asked for, so this is not
       # necessarily what was requested
       def subscriptions : Hash(String, QoS)
-        @message_lock.synchronize { @subscription_qos.dup }
+        @message_lock.synchronize { @subscriptions.transform_values(&.granted) }
       end
 
       # Every packet we transmit is a `Header` subclass
@@ -353,6 +531,23 @@ module MQTT
         end
 
         if ack.success?
+          # remembered so a dropped connection can be re-established exactly as
+          # it was originally requested
+          @message_lock.synchronize do
+            @connect_options = {
+              username:          username,
+              password:          password,
+              keep_alive:        keep_alive,
+              client_id:         client_id,
+              clean_start:       clean_start,
+              will_flag:         will_flag,
+              will_qos:          will_qos.is_a?(QoS) ? will_qos : QoS.from_value(will_qos),
+              will_retain:       will_retain,
+              will_topic:        will_topic,
+              will_payload:      will_payload,
+              keep_alive_active: keep_alive_active,
+            }
+          end
           start_keep_alive(keep_alive) if keep_alive_active
         else
           @transport.close!
@@ -361,7 +556,9 @@ module MQTT
       end
 
       def disconnect(send_msg = true) : Nil
-        return if closed?
+        # a deliberate disconnect must not trigger a reconnect
+        @terminated = true
+        return terminate! if closed?
 
         if send_msg
           disconnect = Disconnect.new
@@ -527,41 +724,24 @@ module MQTT
         topics.each { |filter, config| requested[normalise_filter(filter)] = config }
         filters = requested.keys
 
-        # NOTE:: every requested filter is sent, even one we're already
-        # subscribed to. Filtering the packet but not the response handling is
-        # what used to misalign the return codes against the requested topics
-        sub = Subscribe.new
-        sub.id = MQTT::RequestType::Subscribe
-        sub.qos = required_qos(MQTT::RequestType::Subscribe)
-        sub.topics = requested.transform_values { |(qos, _)| qos }
-
-        pending = Pending(Suback).new
-        message_id = @message_lock.synchronize do
-          id = next_message_id
-          @waiting_suback[id] = pending
-
-          # Update the callbacks
-          requested.each do |filter, (_, proc)|
-            (@subscription_cbs[filter] ||= [] of Proc(String, Bytes, Nil)) << proc
+        # Register up front so a message arriving before we have processed the
+        # SUBACK still reaches its callback
+        @message_lock.synchronize do
+          requested.each do |filter, (qos, proc)|
+            subscription = (@subscriptions[filter] ||= Subscription.new(qos))
+            subscription.requested = qos if qos > subscription.requested
+            subscription.callbacks << proc
           end
-
-          id
         end
 
-        sub.message_id = message_id
-        sub.packet_length = sub.calculate_length
-
         begin
-          # Make the request and wait for the response
-          transmit(sub, timeout)
-          ack = pending.get(timeout, "SUBACK")
+          # NOTE:: every requested filter is sent, even one we're already
+          # subscribed to. Filtering the packet but not the response handling is
+          # what used to misalign the return codes against the requested topics
+          ack = send_subscribe(requested.transform_values { |(qos, _)| qos }, timeout)
           codes = ack.raw_return_codes
 
-          if codes.size != filters.size
-            raise SubscriptionError.new("broker returned #{codes.size} return codes for #{filters.size} topic filters")
-          end
-
-          # Configure the callback QoS, tracking any filter the broker rejected
+          # Record the granted QoS, tracking any filter the broker rejected
           rejected = [] of String
           @message_lock.synchronize do
             filters.each_with_index do |filter, index|
@@ -569,7 +749,7 @@ module MQTT
               if ack.failure?(code)
                 rejected << filter
               else
-                @subscription_qos[filter] = QoS.from_value(code)
+                @subscriptions[filter]?.try &.granted = QoS.from_value(code)
               end
             end
           end
@@ -587,11 +767,41 @@ module MQTT
           # NOTE:: this used to be swallowed, which reported success for a
           # subscription that was never established
           raise error
-        ensure
-          @message_lock.synchronize { @waiting_suback.delete(message_id) }
         end
 
         self
+      end
+
+      # Sends a SUBSCRIBE and returns the broker's SUBACK. Shared by `subscribe`
+      # and the replay that follows a reconnect
+      private def send_subscribe(filters : Hash(String, QoS), timeout : Time::Span?) : Suback
+        sub = Subscribe.new
+        sub.id = MQTT::RequestType::Subscribe
+        sub.qos = required_qos(MQTT::RequestType::Subscribe)
+        sub.topics = filters
+
+        pending = Pending(Suback).new
+        message_id = @message_lock.synchronize do
+          id = next_message_id
+          @waiting_suback[id] = pending
+          id
+        end
+
+        sub.message_id = message_id
+        sub.packet_length = sub.calculate_length
+
+        begin
+          transmit(sub, timeout)
+          ack = pending.get(timeout, "SUBACK")
+
+          codes = ack.raw_return_codes
+          if codes.size != filters.size
+            raise SubscriptionError.new("broker returned #{codes.size} return codes for #{filters.size} topic filters")
+          end
+          ack
+        ensure
+          @message_lock.synchronize { @waiting_suback.delete(message_id) }
+        end
       end
 
       # Undoes the callback registration performed by `subscribe`
@@ -602,13 +812,10 @@ module MQTT
         @message_lock.synchronize do
           requested.each do |filter, (_, proc)|
             next if only && !only.includes?(filter)
-            next unless array = @subscription_cbs[filter]?
+            next unless subscription = @subscriptions[filter]?
 
-            array.delete(proc)
-            if array.empty?
-              @subscription_cbs.delete(filter)
-              @subscription_qos.delete(filter)
-            end
+            subscription.callbacks.delete(proc)
+            @subscriptions.delete(filter) if subscription.callbacks.empty?
           end
         end
       end
@@ -626,12 +833,7 @@ module MQTT
         filters = topics.to_a.flatten.map { |topic| normalise_filter(topic.to_s) }.uniq!
         return self if filters.empty?
 
-        @message_lock.synchronize do
-          filters.each do |filter|
-            @subscription_cbs.delete(filter)
-            @subscription_qos.delete(filter)
-          end
-        end
+        @message_lock.synchronize { filters.each { |filter| @subscriptions.delete(filter) } }
         perform_unsubscribe(filters, timeout)
         self
       end
@@ -643,11 +845,10 @@ module MQTT
         removed = false
 
         @message_lock.synchronize do
-          if array = @subscription_cbs[filter]?
-            removed = !array.delete(callback).nil?
-            if array.empty?
-              @subscription_cbs.delete(filter)
-              @subscription_qos.delete(filter)
+          if subscription = @subscriptions[filter]?
+            removed = !subscription.callbacks.delete(callback).nil?
+            if subscription.callbacks.empty?
+              @subscriptions.delete(filter)
             else
               # other callbacks still want this filter
               removed = false
@@ -771,8 +972,8 @@ module MQTT
       protected def dispatch(topic : String, payload : Bytes) : Nil
         # snapshot under the lock, the callbacks themselves run outside of it
         matched = @message_lock.synchronize do
-          @subscription_cbs.compact_map do |filter, callbacks|
-            {filter, callbacks.dup} if Client.topic_matches(filter, topic)
+          @subscriptions.compact_map do |filter, subscription|
+            {filter, subscription.callbacks.dup} if Client.topic_matches(filter, topic)
           end
         end
 

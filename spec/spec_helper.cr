@@ -3,6 +3,15 @@ require "../src/mqtt"
 require "../src/mqtt/v3/client"
 require "./support/fake_broker"
 
+# Yields until the condition holds, so specs don't depend on fiber scheduling
+def eventually(timeout : Time::Span = 2.seconds, &)
+  expire = Time.utc + timeout
+  until yield
+    raise "condition was not met within #{timeout}" if Time.utc > expire
+    sleep 1.millisecond
+  end
+end
+
 def combine(*args)
   io = IO::Memory.new
   args.each do |part|

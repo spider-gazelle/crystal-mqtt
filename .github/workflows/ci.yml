@@ -19,7 +19,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     container: crystallang/crystal:${{ matrix.crystal }}-alpine
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
     - name: Install dependencies
       run: shards install --ignore-crystal-version
     - name: Run tests
@@ -29,7 +29,7 @@ jobs:
     runs-on: ubuntu-latest
     container: crystallang/crystal:latest-alpine
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
     - name: Install dependencies
       run: shards install --ignore-crystal-version
     - name: Format
@@ -44,7 +44,7 @@ jobs:
     runs-on: ubuntu-latest
     container: crystallang/crystal:latest-alpine
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
     - name: Install dependencies
       run: shards install --ignore-crystal-version
     # the client is driven from several fibers, so the locking has to hold up

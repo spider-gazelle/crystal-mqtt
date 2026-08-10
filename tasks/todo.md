@@ -218,12 +218,39 @@ Beyond the fake-broker suite, the following was run end to end against
 5. **L7 ameba pin.** Left on `branch: master`, matching the in-flight working-tree change — there is
    no tagged ameba release supporting Crystal 1.21 yet. Added a comment recording why.
 
+## Phase 7 — Structural work (follow up)
+
+The two items originally deferred to 2.0, both done without breaking the existing API.
+
+- [x] **Transport construction decoupled from connection.** `Transport::TCP` and
+      `Transport::Websocket` now store their configuration and open the socket in `start`, which the
+      client calls after wiring its callbacks. Constructor signatures are unchanged. A connection
+      failure now surfaces from `Client.new` wrapped in `MQTT::NotConnectedError` (cause preserved)
+      rather than from the transport constructor.
+- [x] **Automatic reconnection.** A new block form,
+      `Client.new(reconnect: MQTT::Reconnect.new) { build_transport }`, re-establishes a dropped
+      connection: exponential backoff, replay of the original CONNECT options, and restoration of
+      every subscription with its callbacks intact. Skipped when the broker reports
+      `session_present`. A deliberate `disconnect` never triggers it, and `terminated?` distinguishes
+      "finished" from "between connections".
+- [x] Consolidated the parallel `@subscription_cbs` / `@subscription_qos` maps into a single
+      `Subscription` holding requested QoS, granted QoS and callbacks. The requested level is what a
+      replay needs, and it was not being tracked at all before.
+- [x] Removed the dead `MQTT::SN` stub and the `promise` dependency; wired the previously unused
+      `RequestType#requires_qos?` into the three places that hardcoded the level.
+- [x] CI: `shards build ameba` (install does not build targets), `actions/checkout@v5`, separate
+      lint and multithreaded jobs.
+
+**Verified:** 104 specs green, including six consecutive `-Dpreview_mt` runs. Reconnection was also
+exercised against `test.mosquitto.org` through a local TCP proxy that was severed mid-session — the
+client reconnected, replayed CONNECT and SUBSCRIBE, and the original callback resumed receiving.
+
 ### Notes for the next pass
 
-- `Transport::TCP` still connects inside its constructor. M8's race is fixed (consumption starts via
-  `Transport#start`, after the client wires its callbacks), but construction and connection are
-  still coupled. Separating them is a 2.0 change.
-- There is no reconnect/resume logic. A dropped connection needs a new transport and client. Session
-  resumption (`clean_start: false`) is accepted on the wire but nothing restores subscriptions.
-- Inbound QoS 2 state (`@inbound_qos2`) is in-memory only and cleared on disconnect, which is correct
-  for `clean_start: true` but would need persisting to support a resumed session.
+- Requests issued while the connection is down fail with `MQTT::NotConnectedError`. Queuing them for
+  delivery on reconnect (an offline buffer) is a deliberate non-goal for now — it needs a bounded
+  policy and a story for what happens to QoS 0 on overflow.
+- Inbound QoS 2 state (`@inbound_qos2`) is in-memory and cleared on disconnect. Correct for
+  `clean_start: true`, but a genuinely resumed session would need it persisted.
+- Outbound QoS 1/2 messages in flight when a connection drops are failed rather than retried on the
+  new connection. MQTT allows retrying them with the DUP flag set.

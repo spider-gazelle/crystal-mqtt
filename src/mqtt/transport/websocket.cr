@@ -3,41 +3,54 @@ require "http/web_socket"
 
 module MQTT
   class Transport::Websocket < Transport
-    def initialize(host : String, path : String, port = nil, tls : HTTP::Client::TLSContext = nil, headers = HTTP::Headers.new)
+    # NOTE:: the socket is not opened here. Connecting is deferred to `start`,
+    # which the client calls once it is ready to consume data
+    def initialize(
+      @host : String,
+      @path : String,
+      @port : Int32? = nil,
+      @tls : HTTP::Client::TLSContext = nil,
+      @headers : HTTP::Headers = HTTP::Headers.new,
+    )
       super()
-
-      # Connect to the server
-      @socket = socket = HTTP::WebSocket.new(host, path, port, tls, headers)
-      socket.on_binary { |data| process_incoming(data) }
-      socket.on_message { |data| process_incoming(data.to_slice) }
     end
 
+    getter host : String
+    getter path : String
+
+    @socket : HTTP::WebSocket? = nil
+    @closing : Bool = false
+
     def start : Nil
+      socket = HTTP::WebSocket.new(@host, @path, @port, @tls, @headers)
+      socket.on_binary { |data| process_incoming(data) }
+      socket.on_message { |data| process_incoming(data.to_slice) }
+      @socket = socket
+
       start_dispatch { process! }
     end
 
     def close! : Nil
       @closing = true
-      @socket.close
+      @socket.try &.close
     end
 
     def closed? : Bool
-      !!@socket.closed?
+      socket = @socket
+      socket.nil? || socket.closed?
     end
 
     def send(message) : Nil
-      @socket.send(message.to_slice)
+      socket = @socket || raise MQTT::NotConnectedError.new("transport has not been started")
+      socket.send(message.to_slice)
     rescue error : IO::Error
-      @socket.close
+      @socket.try &.close
       raise error
     end
 
-    @socket : HTTP::WebSocket
-    @closing : Bool = false
-
     protected def process!
       failure = nil
-      @socket.run
+      @socket.try &.run
     rescue error
       # previously this ran in a bare `spawn` and any failure was lost to an
       # unhandled fiber exception
