@@ -6,3 +6,4 @@ app
 *.dwarf
 .DS_Store
 bin
+tasks
