@@ -1,5 +1,6 @@
 require "./spec_helper"
 require "../src/mqtt/v5/client"
+require "../src/mqtt/client"
 
 # End to end specs for the 5.0 client. Skipped unless MQTT_LIVE_BROKER is set;
 # `./test` starts a broker and sets it for you.
@@ -371,6 +372,21 @@ describe MQTT::V5::Client, tags: "live" do
       # the connection must still be usable afterwards
       client.ping
       client.disconnect
+    end
+
+    it "negotiates 5.0 against a real broker" do
+      negotiating = MQTT::Client.new { MQTT::Transport::TCP.new(host, V5_PORT, connect_timeout: 10).as(MQTT::Transport) }
+      negotiating.connect(client_id: "crystal-neg-#{Random::Secure.hex(4)}").should eq MQTT::Version::V5
+      negotiating.version.should eq MQTT::Version::V5
+
+      topic = v5_topic("negotiated")
+      received = Channel(String).new(4)
+      negotiating.subscribe(topic, qos: MQTT::QoS::BrokerReceived) { |_, payload| received.send(String.new(payload)); nil }
+      negotiating.publish(topic, "over-negotiated", qos: MQTT::QoS::BrokerReceived)
+      take(received, "negotiated publish").should eq "over-negotiated"
+
+      negotiating.disconnect
+      negotiating.closed?.should be_true
     end
 
     it "resumes a session when clean start is false" do
