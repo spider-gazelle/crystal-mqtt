@@ -14,8 +14,6 @@ jobs:
         crystal:
           - latest
           - nightly
-          # oldest release we support, see the crystal constraint in shard.yml
-          - 1.8.2
     runs-on: ${{ matrix.os }}
     container: crystallang/crystal:${{ matrix.crystal }}-alpine
     steps:
