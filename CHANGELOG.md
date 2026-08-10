@@ -124,5 +124,4 @@ individually.
 
 ### Internal
 
-- `shard.yml` now declares `crystal: ">= 1.8.0"`, and CI covers that floor, a
-  multi-threaded run, and lint/format.
+- CI covers Crystal latest and nightly, a multi-threaded run, and lint/format.

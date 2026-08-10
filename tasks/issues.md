@@ -287,7 +287,9 @@ All 27 issues are resolved as of v1.3.0 — see `tasks/todo.md` for the phase br
 - **L6** — `ProtocolError` is now raised by the parse paths, and the dead `MQTT::SN` stub has been
   removed along with the `promise` dependency (see the CHANGELOG for the two transitive effects).
 - **L7** — the ameba dependency stays on `branch: master`; no tagged release supports Crystal 1.21
-  yet. `shard.yml` now declares `crystal: ">= 1.2.0"` and CI covers that floor.
+  yet. CI now builds the ameba target explicitly (`shards install` does not build targets) and tests
+  Crystal latest and nightly. No `crystal:` constraint is declared — pinning a floor we do not test
+  is a claim rather than a guarantee.
 
 Every issue marked *Inspection* above now has a spec covering it, so the register is reproducible
 rather than asserted.

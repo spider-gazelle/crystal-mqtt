@@ -11,8 +11,6 @@ dependencies:
   tokenizer:
     github: spider-gazelle/tokenizer
 
-crystal: ">= 1.8.0"
-
 development_dependencies:
   ameba:
     github: crystal-ameba/ameba
