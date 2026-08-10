@@ -138,6 +138,24 @@ module MQTT::V5
       client.server_reference.should eq "other.broker:1883"
     end
 
+    # the reason that bites in practice: a fixed client id means a redeploy or a
+    # duplicate publisher takes the session over. Reconnecting turns that into
+    # two clients kicking each other off indefinitely
+    it "does not reconnect after the session was taken over" do
+      broker = FakeV5Broker.new
+      client = MQTT::V5::Client.new(
+        reconnect: MQTT::Reconnect.new(initial_delay: 5.milliseconds, max_delay: 10.milliseconds)
+      ) { broker.build_transport }
+      client.connect(client_id: "shared")
+      broker.transports.size.should eq 1
+
+      broker.disconnect!(ReasonCode::SessionTakenOver)
+      eventually { client.terminated? }
+      sleep 50.milliseconds
+      broker.transports.size.should eq 1
+      client.disconnect_reason.should eq ReasonCode::SessionTakenOver
+    end
+
     # a broker that says not to come back should not be retried
     it "does not reconnect after a fatal reason" do
       broker = FakeV5Broker.new

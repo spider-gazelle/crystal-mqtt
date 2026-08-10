@@ -77,7 +77,11 @@ module MQTT
         when .malformed_packet?, .protocol_error?, .unsupported_protocol_version?,
              .client_identifier_not_valid?, .bad_user_name_or_password?, .not_authorized?,
              .banned?, .bad_authentication_method?, .server_moved?, .use_another_server?,
-             .retain_not_supported?, .qo_s_not_supported?
+             .retain_not_supported?, .qo_s_not_supported?,
+        # someone else connected with our client id. Reconnecting kicks
+        # them straight back off, and they reconnect and kick us — two
+        # clients sharing an id fight forever. Stay down instead
+             .session_taken_over?
           true
         else
           false
