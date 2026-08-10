@@ -135,12 +135,12 @@ module MQTT
 
     def publish(topic : String, payload = "", retain : Bool = false,
                 qos : QoS = QoS::FireAndForget, timeout : Time::Span? = @timeout)
-      if modern = v5
-        modern.publish(topic, payload, retain, qos, timeout: timeout)
-      elsif legacy = v3
-        legacy.publish(topic, payload, retain, qos, timeout)
-      else
-        raise NotConnectedError.new("connect has not been called")
+      case client = negotiated
+      in V5::Client then client.publish(topic, payload, retain, qos, timeout: timeout)
+      in V3::Client then client.publish(topic, payload, retain, qos, timeout)
+      in MQTT::ClientBase
+        # the union is exhaustive, the abstract base only satisfies the compiler
+        raise "unreachable"
       end
       self
     end
@@ -149,14 +149,16 @@ module MQTT
                   &callback : String, Bytes, Bool -> Nil)
       filters = topics.to_a.flatten.map(&.to_s).uniq!
 
-      if modern = v5
-        modern.subscribe(filters, callback.as(V5::Client::Callback), qos: qos, timeout: timeout)
-      elsif legacy = v3
+      case client = negotiated
+      in V5::Client
+        client.subscribe(filters, callback.as(V5::Client::Callback), qos: qos, timeout: timeout)
+      in V3::Client
         mapped = {} of String => Tuple(QoS, V3::Client::Callback)
         filters.each { |filter| mapped[filter] = {qos, callback.as(V3::Client::Callback)} }
-        legacy.subscribe(mapped, timeout)
-      else
-        raise NotConnectedError.new("connect has not been called")
+        client.subscribe(mapped, timeout)
+      in MQTT::ClientBase
+        # the union is exhaustive, the abstract base only satisfies the compiler
+        raise "unreachable"
       end
       self
     end
