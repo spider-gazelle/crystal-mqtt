@@ -38,6 +38,27 @@ jobs:
     - name: Lint
       run: ./bin/ameba
 
+  live-broker:
+    runs-on: ubuntu-latest
+    container: crystallang/crystal:latest-alpine
+    steps:
+    - uses: actions/checkout@v5
+    - name: Install dependencies
+      run: shards install --ignore-crystal-version
+    # a service container cannot be given a config file or a command override,
+    # and mosquitto 2.x refuses anonymous clients without one, so run it here
+    - name: Start mosquitto
+      run: |
+        apk add --no-cache mosquitto
+        mosquitto -c spec/mosquitto.conf -d
+        sleep 2
+    # retained message persistence is broker side, so it only means anything
+    # when tested against a real one
+    - name: Run tests against a real broker
+      run: crystal spec -v --error-trace
+      env:
+        MQTT_LIVE_BROKER: localhost
+
   multithreaded:
     runs-on: ubuntu-latest
     container: crystallang/crystal:latest-alpine

@@ -13,16 +13,21 @@ module MQTT
         MQTT.topic_matches?(filter, topic)
       end
 
+      # A subscription callback. The three argument form additionally receives
+      # whether the broker flagged the message as retained, which is how you
+      # tell stored state from a live update
+      alias Callback = Proc(String, Bytes, Nil) | Proc(String, Bytes, Bool, Nil)
+
       # Everything we know about one topic filter. Kept together so a
       # reconnection can replay the subscription exactly as it was requested
       private class Subscription
         property requested : QoS
         property granted : QoS
-        getter callbacks : Array(Proc(String, Bytes, Nil))
+        getter callbacks : Array(Callback)
 
         def initialize(@requested : QoS, granted : QoS? = nil)
           @granted = granted || @requested
-          @callbacks = [] of Proc(String, Bytes, Nil)
+          @callbacks = [] of Callback
         end
       end
 
@@ -336,13 +341,13 @@ module MQTT
       end
 
       # http://www.steves-internet-guide.com/understanding-mqtt-topics/
-      def subscribe(topics : Hash(String, Tuple(QoS, Proc(String, Bytes, Nil))), timeout : Time::Span? = @timeout)
+      def subscribe(topics : Hash(String, Tuple(QoS, Callback)), timeout : Time::Span? = @timeout)
         # MQTT-3.8.3-3, a SUBSCRIBE must carry at least one topic filter
         raise ArgumentError.new("at least one topic filter is required") if topics.empty?
 
         # Normalise once so the callback registry, the QoS registry and the
         # wire payload all agree on the key
-        requested = {} of String => Tuple(QoS, Proc(String, Bytes, Nil))
+        requested = {} of String => Tuple(QoS, Callback)
         topics.each { |filter, config| requested[normalise_filter(filter)] = config }
         filters = requested.keys
 
@@ -422,7 +427,7 @@ module MQTT
 
       # Undoes the callback registration performed by `subscribe`
       private def remove_callbacks(
-        requested : Hash(String, Tuple(QoS, Proc(String, Bytes, Nil))),
+        requested : Hash(String, Tuple(QoS, Callback)),
         only : Array(String)? = nil,
       ) : Nil
         @message_lock.synchronize do
@@ -436,8 +441,11 @@ module MQTT
         end
       end
 
-      def subscribe(*topics, qos : QoS = QoS::FireAndForget, timeout : Time::Span? = @timeout, &callback : Proc(String, Bytes, Nil))
-        mapped_topics = {} of String => Tuple(QoS, Proc(String, Bytes, Nil))
+      # NOTE:: the block may take two parameters (topic, payload) or three
+      # (topic, payload, retained). Crystal lets a shorter block satisfy the
+      # longer restriction, so existing two parameter blocks are unaffected
+      def subscribe(*topics, qos : QoS = QoS::FireAndForget, timeout : Time::Span? = @timeout, &callback : String, Bytes, Bool -> Nil)
+        mapped_topics = {} of String => Tuple(QoS, Callback)
         topics.to_a.flatten.map(&.to_s).uniq!.each do |topic|
           mapped_topics[topic] = {qos, callback}
         end
@@ -456,7 +464,7 @@ module MQTT
 
       # Removes a single callback, only unsubscribing once the last callback
       # for the filter has been removed
-      def unsubscribe(topic : String, callback : Proc(String, Bytes, Nil), timeout : Time::Span? = @timeout)
+      def unsubscribe(topic : String, callback : Callback, timeout : Time::Span? = @timeout)
         filter = normalise_filter(topic)
         removed = false
 
@@ -544,10 +552,10 @@ module MQTT
       def publish_received(pub)
         case pub.qos
         in QoS::FireAndForget
-          dispatch(pub.topic, pub.payload)
+          dispatch(pub.topic, pub.payload, pub.retain)
         in QoS::BrokerReceived
           acknowledge(RequestType::Puback, pub.message_id)
-          dispatch(pub.topic, pub.payload)
+          dispatch(pub.topic, pub.payload, pub.retain)
         in QoS::SubscribersReceived
           # MQTT-4.3.3, hold the message until the broker releases it with
           # PUBREL so that a redelivery can't be dispatched twice
@@ -567,7 +575,7 @@ module MQTT
         acknowledge(RequestType::Pubcomp, message_id)
 
         if held
-          dispatch(held.topic, held.payload)
+          dispatch(held.topic, held.payload, held.retain)
         else
           Log.warn { "unexpected publish release, id #{message_id}" }
         end
@@ -583,7 +591,7 @@ module MQTT
       end
 
       # Invokes any callback whose filter matches the topic
-      protected def dispatch(topic : String, payload : Bytes) : Nil
+      protected def dispatch(topic : String, payload : Bytes, retained : Bool = false) : Nil
         # snapshot under the lock, the callbacks themselves run outside of it
         matched = @message_lock.synchronize do
           @subscriptions.compact_map do |filter, subscription|
@@ -593,7 +601,10 @@ module MQTT
 
         matched.each do |(filter, callbacks)|
           callbacks.each do |callback|
-            callback.call(topic, payload)
+            case callback
+            in Proc(String, Bytes, Nil)       then callback.call(topic, payload)
+            in Proc(String, Bytes, Bool, Nil) then callback.call(topic, payload, retained)
+            end
           rescue error
             Log.error(exception: error) { "callback failed #{filter} for #{topic}" }
           end
