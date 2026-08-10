@@ -67,6 +67,16 @@ module MQTT
 
       # Topic aliases are scoped to a connection and reset on every new one
       @inbound_aliases = {} of UInt16 => String
+      @outbound_aliases = {} of String => UInt16
+
+      # A token per in flight QoS > 0 publish the broker will accept, sized
+      # from Receive Maximum once the CONNACK tells us. Nil until then, and
+      # closed when the connection drops so blocked publishers fail fast
+      @inflight : ::Channel(Nil)? = nil
+
+      # Use topic aliases when the broker offers them. Saves repeating a topic
+      # string on every publish; set false to always send the topic
+      property? use_topic_aliases : Bool = true
 
       # What the broker told us it will accept, from the CONNACK
       getter server_receive_maximum : UInt16 = 65_535_u16
@@ -80,6 +90,9 @@ module MQTT
 
       # The identifier the broker assigned when we sent an empty one
       getter assigned_client_id : String? = nil
+
+      # The session expiry the broker settled on, which may differ from ours
+      getter session_expiry_interval : UInt32? = nil
 
       # Why the broker closed the connection, when it said
       getter disconnect_reason : ReasonCode? = nil
@@ -133,6 +146,12 @@ module MQTT
       protected def reset_connection_state : Nil
         @inbound_qos2.clear
         @inbound_aliases.clear
+        @outbound_aliases.clear
+
+        # wake anything waiting on an in flight slot, there is no connection
+        # left for it to use
+        @inflight.try &.close
+        @inflight = nil
       end
 
       # A broker that told us not to come back is not worth retrying
@@ -257,6 +276,7 @@ module MQTT
       # Records what the broker said it will and won't accept
       private def adopt(ack : Connack) : Nil
         @assigned_client_id = ack.assigned_client_identifier
+        @session_expiry_interval = ack.session_expiry_interval
         @server_receive_maximum = ack.receive_maximum
         @server_maximum_qos = ack.maximum_qos
         @server_maximum_packet_size = ack.maximum_packet_size
@@ -265,6 +285,77 @@ module MQTT
         @server_wildcard_available = ack.wildcard_subscription_available?
         @server_shared_subscriptions_available = ack.shared_subscription_available?
         @server_subscription_identifiers_available = ack.subscription_identifier_available?
+
+        # MQTT-4.9, a fresh allowance of in flight messages for this connection
+        @message_lock.synchronize do
+          @outbound_aliases.clear
+          @inflight.try &.close
+          tokens = ::Channel(Nil).new(@server_receive_maximum.to_i)
+          @server_receive_maximum.times { tokens.send(nil) }
+          @inflight = tokens
+        end
+      end
+
+      # MQTT-4.9. The broker will only accept so many unacknowledged QoS > 0
+      # publishes at once, so wait for a slot rather than being disconnected
+      private def acquire_slot(timeout : Time::Span?) : Nil
+        return unless tokens = @message_lock.synchronize { @inflight }
+
+        if timeout
+          select
+          when tokens.receive
+            # got a slot
+          when ::timeout(timeout)
+            raise TimeoutError.new("timed out waiting for one of the broker's #{@server_receive_maximum} in flight slots")
+          end
+        else
+          tokens.receive
+        end
+      rescue ::Channel::ClosedError
+        raise NotConnectedError.new("client has disconnected")
+      end
+
+      private def release_slot(tokens : ::Channel(Nil)?) : Nil
+        return unless tokens
+
+        # non blocking: if the bucket is already full there is nothing to give
+        # back, which happens when a connection reset replaced it
+        select
+        when tokens.send(nil)
+        else
+        end
+      rescue ::Channel::ClosedError
+      end
+
+      # MQTT-3.1.2.11.4, refuse locally rather than being disconnected for it
+      protected def transmit(packet : Request, timeout : Time::Span?) : Nil
+        if limit = @server_maximum_packet_size
+          size = packet.fixed_header_size.to_u32 + packet.packet_length
+          if size > limit
+            raise PacketError.new("packet of #{size} bytes exceeds the broker's maximum packet size of #{limit} bytes")
+          end
+        end
+        super
+      end
+
+      # Picks the alias to publish a topic under, and whether the topic string
+      # itself can be omitted because the broker already knows the mapping
+      private def outbound_alias(topic : String) : Tuple(UInt16, Bool)?
+        return unless use_topic_aliases?
+        limit = @server_topic_alias_maximum
+        return if limit.zero?
+
+        @message_lock.synchronize do
+          if established = @outbound_aliases[topic]?
+            next {established, true}
+          end
+
+          # aliases run 1..topic_alias_maximum, and zero is not valid
+          next if @outbound_aliases.size >= limit
+          assigned = (@outbound_aliases.size + 1).to_u16
+          @outbound_aliases[topic] = assigned
+          {assigned, false}
+        end
       end
 
       def disconnect(send_msg = true, reason : ReasonCode = ReasonCode::Success) : Nil
@@ -365,6 +456,14 @@ module MQTT
         packet.qos = qos
         packet.topic = topic
         packet.retain = retain
+
+        # MQTT-3.3.2.3.4. The first publish carries topic and alias together,
+        # later ones send the alias with an empty topic
+        if mapping = outbound_alias(topic)
+          alias_id, established = mapping
+          packet.topic = "" if established
+          packet.topic_alias = alias_id
+        end
         packet.payload = payload
         packet.content_type = content_type
         packet.response_topic = response_topic
@@ -378,25 +477,44 @@ module MQTT
           packet.packet_length = packet.calculate_length
           transmit(packet, timeout)
         in QoS::BrokerReceived
-          reserve_ack(RequestType::Puback) do |id, pending|
-            packet.message_id = id
-            packet.packet_length = packet.calculate_length
-            transmit(packet, timeout)
-            check!(pending.get(timeout, "PUBACK").as(Ack), "publish")
+          acquire_slot(timeout)
+          tokens = @message_lock.synchronize { @inflight }
+          begin
+            reserve_ack(RequestType::Puback) do |id, pending|
+              packet.message_id = id
+              packet.packet_length = packet.calculate_length
+              transmit(packet, timeout)
+              check!(pending.get(timeout, "PUBACK").as(Ack), "publish")
+            end
+          ensure
+            release_slot(tokens)
           end
         in QoS::SubscribersReceived
           # PUBLISH -> PUBREC -> PUBREL -> PUBCOMP
+          acquire_slot(timeout)
+          tokens = @message_lock.synchronize { @inflight }
           received = nil
-          message_id = reserve_ack(RequestType::Pubrec) do |id, pending|
-            packet.message_id = id
-            packet.packet_length = packet.calculate_length
-            transmit(packet, timeout)
-            received = pending.get(timeout, "PUBREC").as(Ack)
+          message_id = begin
+            reserve_ack(RequestType::Pubrec) do |id, pending|
+              packet.message_id = id
+              packet.packet_length = packet.calculate_length
+              transmit(packet, timeout)
+              received = pending.get(timeout, "PUBREC").as(Ack)
+            end
+          rescue error
+            # the exchange never got started, so the slot is ours to give back
+            release_slot(tokens)
+            raise error
           end
 
           # MQTT-4.3.3, a PUBREC that reports an error ends the exchange. There
           # is nothing to release, so no PUBREL is sent
-          check!(received.as(Ack), "publish")
+          begin
+            check!(received.as(Ack), "publish")
+          rescue error
+            release_slot(tokens)
+            raise error
+          end
 
           release = Pubrel.new
           release.id = MQTT::RequestType::Pubrel
@@ -410,6 +528,8 @@ module MQTT
             check!(pending.get(timeout, "PUBCOMP").as(Ack), "publish release")
           ensure
             forget(RequestType::Pubcomp, message_id)
+            # the exchange is over either way, MQTT-4.9 frees the slot on PUBCOMP
+            release_slot(tokens)
           end
         end
 

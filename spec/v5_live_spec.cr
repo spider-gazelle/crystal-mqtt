@@ -235,7 +235,7 @@ describe MQTT::V5::Client, tags: "live" do
     it "tags delivered messages with the subscription identifier" do
       client = v5_client(host)
       client.connect(client_id: "crystal-v5-subid-#{Random::Secure.hex(4)}")
-      next unless client.server_subscription_identifiers_available?
+      client.server_subscription_identifiers_available?.should be_true
 
       topic = v5_topic("subid")
       received = Channel(MQTT::V5::Publish).new(4)
@@ -289,6 +289,87 @@ describe MQTT::V5::Client, tags: "live" do
       client.connect(client_id: "crystal-v5-ping-#{Random::Secure.hex(4)}", keep_alive: 60)
       client.ping
       client.last_ping_response.should_not be_nil
+      client.disconnect
+    end
+
+    # ---- negotiated limits and aliases -------------------------------------
+
+    it "reuses a topic alias after the first publish" do
+      client = v5_client(host)
+      client.connect(client_id: "crystal-v5-alias-#{Random::Secure.hex(4)}")
+      client.server_topic_alias_maximum.should be > 0
+
+      topic = v5_topic("alias")
+      received = Channel(MQTT::V5::Publish).new(8)
+      handler = ->(packet : MQTT::V5::Publish) { received.send(packet); nil }
+      client.subscribe([topic], handler, qos: MQTT::QoS::BrokerReceived)
+
+      # the broker has to resolve the alias back to the full topic for us, so
+      # both messages must arrive naming the same topic
+      client.publish(topic, "first", qos: MQTT::QoS::BrokerReceived)
+      first = take(received, "first publish").as(MQTT::V5::Publish)
+      first.topic.should eq topic
+      String.new(first.payload).should eq "first"
+
+      client.publish(topic, "second", qos: MQTT::QoS::BrokerReceived)
+      second = take(received, "second publish").as(MQTT::V5::Publish)
+      second.topic.should eq topic
+      String.new(second.payload).should eq "second"
+
+      client.disconnect
+    end
+
+    it "sends the full topic when aliases are disabled" do
+      client = v5_client(host)
+      client.use_topic_aliases = false
+      client.connect(client_id: "crystal-v5-noalias-#{Random::Secure.hex(4)}")
+
+      topic = v5_topic("noalias")
+      received = Channel(String).new(8)
+      client.subscribe(topic, qos: MQTT::QoS::BrokerReceived) { |name, _| received.send(name); nil }
+
+      client.publish(topic, "a", qos: MQTT::QoS::BrokerReceived)
+      take(received, "first").should eq topic
+      client.publish(topic, "b", qos: MQTT::QoS::BrokerReceived)
+      take(received, "second").should eq topic
+      client.disconnect
+    end
+
+    it "keeps publishing beyond the broker's in flight allowance" do
+      client = v5_client(host)
+      client.connect(client_id: "crystal-v5-flow-#{Random::Secure.hex(4)}")
+
+      topic = v5_topic("flow")
+      received = Channel(String).new(128)
+      client.subscribe(topic, qos: MQTT::QoS::BrokerReceived) { |_, payload| received.send(String.new(payload)); nil }
+
+      # more messages than the broker will hold in flight at once, so the
+      # flow control has to release slots as PUBACKs come back
+      count = client.server_receive_maximum.to_i + 5
+      count = 30 if count > 30
+
+      count.times { |i| client.publish(topic, i.to_s, qos: MQTT::QoS::BrokerReceived) }
+
+      seen = [] of String
+      count.times { seen << take(received, "flow controlled publish").as(String) }
+      seen.sort_by(&.to_i).should eq (0...count).map(&.to_s)
+      client.disconnect
+    end
+
+    it "refuses a packet larger than the broker will accept" do
+      client = v5_client(host)
+      client.connect(client_id: "crystal-v5-size-#{Random::Secure.hex(4)}")
+
+      limit = client.server_maximum_packet_size
+      raise "broker did not advertise a maximum packet size" unless limit
+
+      oversized = "x" * (limit + 1024)
+      expect_raises(MQTT::PacketError, /maximum packet size/) do
+        client.publish(v5_topic("oversized"), oversized, qos: MQTT::QoS::BrokerReceived)
+      end
+
+      # the connection must still be usable afterwards
+      client.ping
       client.disconnect
     end
 
