@@ -8,13 +8,16 @@ module MQTT
 
       # Connect to the server
       @socket = socket = HTTP::WebSocket.new(host, path, port, tls, headers)
-      socket.on_close { @on_close.try &.call }
-      socket.on_binary { |data| process(data) }
-      socket.on_message { |data| process(data.to_slice) }
-      spawn { socket.run }
+      socket.on_binary { |data| process_incoming(data) }
+      socket.on_message { |data| process_incoming(data.to_slice) }
+    end
+
+    def start : Nil
+      start_dispatch { process! }
     end
 
     def close! : Nil
+      @closing = true
       @socket.close
     end
 
@@ -30,11 +33,17 @@ module MQTT
     end
 
     @socket : HTTP::WebSocket
+    @closing : Bool = false
 
-    protected def process(data : Bytes)
-      @tokenizer.extract(data).each do |bytes|
-        spawn { @on_message.try &.call(bytes) }
-      end
+    protected def process!
+      failure = nil
+      @socket.run
+    rescue error
+      # previously this ran in a bare `spawn` and any failure was lost to an
+      # unhandled fiber exception
+      failure = error unless @closing
+    ensure
+      finish_processing(failure)
     end
   end
 end

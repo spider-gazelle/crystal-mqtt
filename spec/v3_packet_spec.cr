@@ -62,8 +62,8 @@ module MQTT::V3
       when RequestType::Publish
         packet = io.read_bytes Publish
         packet.qos.should eq(QoS::FireAndForget)
-        packet.retain.should eq(false)
-        packet.duplicate.should eq(false)
+        packet.retain.should be_false
+        packet.duplicate.should be_false
         packet.topic.should eq("test")
         String.new(packet.payload).should eq("hello world")
       else
@@ -79,8 +79,8 @@ module MQTT::V3
       when RequestType::Publish
         packet = io.read_bytes Publish
         packet.qos.should eq(QoS::SubscribersReceived)
-        packet.retain.should eq(true)
-        packet.duplicate.should eq(true)
+        packet.retain.should be_true
+        packet.duplicate.should be_true
         packet.topic.should eq("c/d")
         String.new(packet.payload).should eq("hello world")
       else
@@ -215,7 +215,7 @@ module MQTT::V3
           packet.version.should eq(Version::V31)
           packet.client_id.should eq("myclient")
           packet.keep_alive_seconds.should eq(10)
-          packet.clean_start.should eq(false)
+          packet.clean_start.should be_false
         else
           raise "incorrect packet type"
         end
@@ -233,7 +233,7 @@ module MQTT::V3
           packet.version.should eq(Version::V311)
           packet.client_id.should eq("myclient")
           packet.keep_alive_seconds.should eq(10)
-          packet.clean_start.should eq(false)
+          packet.clean_start.should be_false
         else
           raise "incorrect packet type"
         end
@@ -251,7 +251,7 @@ module MQTT::V3
           packet.version.should eq(Version::V31)
           packet.client_id.should eq("myclient")
           packet.keep_alive_seconds.should eq(10)
-          packet.clean_start.should eq(true)
+          packet.clean_start.should be_true
         else
           raise "incorrect packet type"
         end
@@ -269,10 +269,10 @@ module MQTT::V3
           packet.version.should eq(Version::V31)
           packet.client_id.should eq("myclient")
           packet.keep_alive_seconds.should eq(10)
-          packet.clean_start.should eq(true)
+          packet.clean_start.should be_true
           packet.will_topic.should eq("topic")
           packet.will_payload.should eq("hello")
-          packet.will_flag.should eq(true)
+          packet.will_flag.should be_true
           packet.will_qos.should eq(QoS::BrokerReceived)
         else
           raise "incorrect packet type"
@@ -291,10 +291,10 @@ module MQTT::V3
           packet.version.should eq(Version::V31)
           packet.client_id.should eq("myclient")
           packet.keep_alive_seconds.should eq(10)
-          packet.clean_start.should eq(false)
+          packet.clean_start.should be_false
           packet.username.should eq("username")
           packet.password.should eq("password")
-          packet.will_flag.should eq(false)
+          packet.will_flag.should be_false
         else
           raise "incorrect packet type"
         end
@@ -312,10 +312,10 @@ module MQTT::V3
           packet.version.should eq(Version::V31)
           packet.client_id.should eq("myclient")
           packet.keep_alive_seconds.should eq(10)
-          packet.clean_start.should eq(false)
+          packet.clean_start.should be_false
           packet.username.should eq("username")
           packet.password.should eq("")
-          packet.will_flag.should eq(false)
+          packet.will_flag.should be_false
         else
           raise "incorrect packet type"
         end
@@ -333,10 +333,10 @@ module MQTT::V3
           packet.version.should eq(Version::V31)
           packet.client_id.should eq("myclient")
           packet.keep_alive_seconds.should eq(10)
-          packet.clean_start.should eq(false)
+          packet.clean_start.should be_false
           packet.username.should eq("")
           packet.password.should eq("password")
-          packet.will_flag.should eq(false)
+          packet.will_flag.should be_false
         else
           raise "incorrect packet type"
         end
@@ -361,10 +361,10 @@ module MQTT::V3
           packet.keep_alive_seconds.should eq(65535)
           packet.username.should eq("user0123456789")
           packet.password.should eq("pass0123456789")
-          packet.clean_start.should eq(true)
+          packet.clean_start.should be_true
           packet.will_topic.should eq("will_topic")
           packet.will_payload.should eq("will_message")
-          packet.will_flag.should eq(true)
+          packet.will_flag.should be_true
         else
           raise "incorrect packet type"
         end
@@ -394,9 +394,9 @@ module MQTT::V3
         case MQTT.peek_type(io)
         when RequestType::Connack
           packet = io.read_bytes Connack
-          packet.session_present.should eq(false)
+          packet.session_present.should be_false
           packet.return_code.should eq(0)
-          packet.success?.should eq(true)
+          packet.success?.should be_true
         else
           raise "incorrect packet type"
         end
@@ -409,9 +409,9 @@ module MQTT::V3
         case MQTT.peek_type(io)
         when RequestType::Connack
           packet = io.read_bytes Connack
-          packet.session_present.should eq(true)
+          packet.session_present.should be_true
           packet.return_code.should eq(0)
-          packet.success?.should eq(true)
+          packet.success?.should be_true
         else
           raise "incorrect packet type"
         end
@@ -424,9 +424,9 @@ module MQTT::V3
         case MQTT.peek_type(io)
         when RequestType::Connack
           packet = io.read_bytes Connack
-          packet.session_present.should eq(false)
+          packet.session_present.should be_false
           packet.return_code.should eq(2)
-          packet.success?.should eq(false)
+          packet.success?.should be_false
 
           expect_raises(::Exception, "Connection refused: client identifier rejected") do
             packet.success!

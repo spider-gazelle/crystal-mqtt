@@ -6,7 +6,7 @@ on:
   schedule:
     - cron: "0 6 * * 1"
 jobs:
-  build:
+  test:
     strategy:
       fail-fast: false
       matrix:
@@ -14,16 +14,42 @@ jobs:
         crystal:
           - latest
           - nightly
-          - 1.0.0
+          # oldest release we support, see the crystal constraint in shard.yml
+          - 1.8.2
     runs-on: ${{ matrix.os }}
     container: crystallang/crystal:${{ matrix.crystal }}-alpine
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - name: Install dependencies
       run: shards install --ignore-crystal-version
-    - name: Lint
-      run: ./bin/ameba
-    - name: Format
-      run: crystal tool format --check
     - name: Run tests
       run: crystal spec -v --error-trace
+
+  lint:
+    runs-on: ubuntu-latest
+    container: crystallang/crystal:latest-alpine
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install dependencies
+      run: shards install --ignore-crystal-version
+    - name: Format
+      run: crystal tool format --check
+    # `shards install` does not build targets, ameba has to be built explicitly
+    - name: Build ameba
+      run: shards build ameba
+    - name: Lint
+      run: ./bin/ameba
+
+  multithreaded:
+    runs-on: ubuntu-latest
+    container: crystallang/crystal:latest-alpine
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install dependencies
+      run: shards install --ignore-crystal-version
+    # the client is driven from several fibers, so the locking has to hold up
+    # when those fibers are genuinely running in parallel
+    - name: Run tests (preview_mt)
+      run: crystal spec -v --error-trace -Dpreview_mt
+      env:
+        CRYSTAL_WORKERS: 4

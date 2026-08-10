@@ -1,12 +1,23 @@
 require "../transport"
-require "promise"
+require "../pending"
 require "mutex"
 
 module MQTT
   module V3
     # https://test.mosquitto.org/
     class Client
+      # How long to wait for a broker response before giving up.
+      # Previously every request waited forever
+      DEFAULT_TIMEOUT = 30.seconds
+
       getter last_ping_response : Time? = nil
+
+      # Applied to any request that isn't given an explicit timeout.
+      # Set to `nil` to wait indefinitely
+      property timeout : Time::Span?
+
+      # Largest packet we're willing to buffer from the broker
+      getter max_packet_size : UInt32
 
       @message_lock = Mutex.new
       @message_id = 0_u16
@@ -16,12 +27,22 @@ module MQTT
         filter_array = filter.split("/")
         # remove any MQTT shared subscription prefix
         # https://emqx.medium.com/introduction-to-mqtt-5-0-protocol-shared-subscription-4c23e7e0e3c1
-        filter_array = filter_array[2..-1] if filter_array.first? == "$share"
+        if filter_array.first? == "$share"
+          filter_array = filter_array.size > 2 ? filter_array[2..] : [] of String
+        end
         topic_array = topic.split("/")
 
         # Normalise the strings
         topic_array.shift if topic_array[0].empty?
-        filter_array.shift if filter_array[0].empty?
+        filter_array.shift if filter_array.first?.try(&.empty?)
+
+        # MQTT-4.7.2-1: a wildcard at the first level must not match a topic
+        # beginning with `$`, those are reserved for the broker
+        if topic_array.first?.try(&.starts_with?('$'))
+          leading = filter_array.first?
+          return false if leading == "#" || leading == "+"
+        end
+
         length = filter_array.size
 
         filter_array.each_with_index do |left, index|
@@ -34,21 +55,47 @@ module MQTT
         topic_array.size == length
       end
 
-      protected def next_message_id
-        # Allow overflows
-        @message_id = @message_id &+ 1
+      # Packet identifiers must be non-zero and must not collide with a request
+      # that is still in flight.
+      # NOTE:: `@message_lock` must be held by the caller
+      protected def next_message_id : UInt16
+        UInt16::MAX.times do
+          # Allow overflows, but skip 0 as MQTT-2.3.1-1 reserves it
+          @message_id = @message_id &+ 1
+          @message_id = 1_u16 if @message_id.zero?
+          id = @message_id
+          return id unless in_flight?(id)
+        end
+
+        raise Error.new("no packet identifiers available, too many requests in flight")
       end
 
-      @waiting_ack = {} of UInt16 => Promise::DeferredPromise(Ack)
-      @waiting_suback = {} of UInt16 => Promise::DeferredPromise(Suback)
-      @waiting_connect : Promise::DeferredPromise(Connack)? = nil
+      private def in_flight?(id : UInt16) : Bool
+        return true if @waiting_suback.has_key?(id)
+        @waiting_ack.each_key { |key| return true if key[1] == id }
+        false
+      end
 
-      def initialize(@transport : Transport)
+      @waiting_ack = {} of Tuple(RequestType, UInt16) => Pending(Ack)
+      @waiting_suback = {} of UInt16 => Pending(Suback)
+      @waiting_ping = [] of Pending(EmptyPacket)
+      @waiting_connect : Pending(Connack)? = nil
+
+      # Inbound QoS 2 messages held between PUBLISH and PUBREL
+      @inbound_qos2 = {} of UInt16 => Publish
+
+      # Monotonic timestamp of the last packet sent or received, used to decide
+      # whether a keep alive ping is required
+      @last_activity : MQTT::Monotonic = MQTT.monotonic
+
+      def initialize(
+        @transport : Transport,
+        @timeout : Time::Span? = DEFAULT_TIMEOUT,
+        @max_packet_size : UInt32 = MQTT::DEFAULT_MAX_PACKET_SIZE,
+      )
         # Configure the subscription callback config
         @subscription_qos = {} of String => QoS
-        @subscription_cbs = Hash(String, Array(Proc(String, Bytes, Nil))).new do |h, k|
-          h[k] = [] of Proc(String, Bytes, Nil)
-        end
+        @subscription_cbs = {} of String => Array(Proc(String, Bytes, Nil))
 
         # Closes when the socket disconnects
         @wait_close = Channel(Nil).new
@@ -66,105 +113,182 @@ module MQTT
           nil
         end
 
-        spawn { self.process_requests! }
+        spawn(name: "mqtt-requests") { process_requests! }
+
+        # Only safe to consume data once the callbacks above are configured
+        @transport.start
       end
 
       protected def tokenize(buffer : IO::Memory) : Int32
         return -1 if buffer.size < 2
-        begin
-          header = buffer.read_bytes Header
-          header.to_slice.size + header.packet_length
+
+        header = begin
+          buffer.read_bytes Header
         rescue
-          -1
+          # the variable length header isn't complete yet
+          return -1
         end
+
+        length = header.fixed_header_size.to_i64 + header.packet_length
+        if length > @max_packet_size
+          # without this a hostile broker can advertise a 256MB packet and make
+          # us buffer all of it before a single message is dispatched
+          Log.error { "packet of #{length} bytes exceeds the maximum packet size of #{@max_packet_size} bytes, closing connection" }
+          @transport.close!
+          return -1
+        end
+
+        length.to_i32
       end
 
       protected def on_close(error : ::Exception?)
         # Clean up the connection state here
         if error
-          Log.error(exception: error) { "Socket closed, error consuming IO\n#{error.inspect_with_backtrace}" }
+          Log.error(exception: error) { "socket closed, error consuming IO" }
         else
-          Log.debug { "Socket closed, stopped processing incoming messages." }
+          Log.debug { "socket closed, stopped processing incoming messages." }
         end
 
-        error = IO::Error.new("Socket closed, stopped processing incoming messages.")
+        # NOTE:: `cause` is set through the constructor. `Exception#cause=` only
+        # existed here because the promise shard monkey patched it in
+        failure = NotConnectedError.new("socket closed, stopped processing incoming messages.", error)
+
+        # Collect under the lock, complete outside of it. A waiter woken by a
+        # rejection may re-enter the client and `Mutex` is not re-entrant
+        connecting = nil
+        subacks = [] of Pending(Suback)
+        acks = [] of Pending(Ack)
+        pings = [] of Pending(EmptyPacket)
+
         @message_lock.synchronize do
-          @waiting_connect.try &.reject(error)
+          connecting = @waiting_connect
           @waiting_connect = nil
-          @waiting_suback.each_value &.reject(error)
+          subacks = @waiting_suback.values
           @waiting_suback.clear
-          @waiting_ack.each_value &.reject(error)
+          acks = @waiting_ack.values
           @waiting_ack.clear
-          @wait_close.close
+          pings = @waiting_ping.dup
+          @waiting_ping.clear
+          @inbound_qos2.clear
         end
+
+        connecting.try &.reject(failure)
+        subacks.each &.reject(failure)
+        acks.each &.reject(failure)
+        pings.each &.reject(failure)
+
+        # stops the request processor and wakes anything in `wait_close`
+        @processor.close
+        @wait_close.close
       end
 
       # Returns once the MQTT connection has terminated
       def wait_close : Nil
-        channel = @message_lock.synchronize { @wait_close }
-        channel.receive? unless channel.closed?
+        @wait_close.receive?
       end
 
-      # NOTE:: Unsubscribe is the same class as Subscribe
-      alias Request = Connect | Publish | Subscribe | EmptyPacket
-      @processor = ::Channel(Tuple(Request, Promise::DeferredPromise(Connack) | Promise::DeferredPromise(Suback) | Promise::DeferredPromise(Ack) | Promise::DeferredPromise(Bool))).new(8)
+      # The QoS the broker granted for each active subscription.
+      # A broker is free to downgrade the level you asked for, so this is not
+      # necessarily what was requested
+      def subscriptions : Hash(String, QoS)
+        @message_lock.synchronize { @subscription_qos.dup }
+      end
+
+      # Every packet we transmit is a `Header` subclass
+      alias Request = Header
+
+      # Carries the outcome of writing a packet back to the requesting fiber,
+      # `nil` meaning the write succeeded
+      alias SendResult = ::Channel(::Exception?)
+
+      @processor = ::Channel(Tuple(Request, SendResult?)).new(8)
 
       protected def process_requests!
         Log.debug { "request processing has started..." }
 
-        loop do
-          received = @processor.receive?
-
-          # nil if the channel was closed
-          break unless received
-          packet, promise = received
+        while received = @processor.receive?
+          packet, result = received
 
           begin
-            if !@transport.closed?
-              Log.debug { "writing packet: #{packet.inspect}" }
-              @transport.send(packet)
-
-              # If not expecting a response we'll resolve it after sending
-              if promise.is_a?(Promise::DeferredPromise(Bool))
-                promise.resolve(true)
-              else
-                # TODO:: implement timeouts
-              end
-            else
-              promise.reject(NotConnectedError.new("socket closed"))
+            if @transport.closed?
+              result.try &.send(NotConnectedError.new("socket closed"))
+              next
             end
+
+            Log.debug { "writing packet: #{packet.inspect}" }
+            @transport.send(packet)
+            @last_activity = MQTT.monotonic
+            result.try &.send(nil)
           rescue e : IO::Error
-            promise.reject(Error.new("IO error", e)) if promise
+            result.try &.send(Error.new("IO error", e))
           rescue e
             Log.error(exception: e) { "error processing request #{packet.id}" }
-            promise.reject(Error.new("unexpected error", e)) if promise
+            result.try &.send(Error.new("unexpected error", e))
           end
         end
       ensure
         Log.debug { "request processing has stopped" }
       end
 
+      # Queues a packet and blocks until it has been written to the transport
+      protected def transmit(packet : Request, timeout : Time::Span?) : Nil
+        result = SendResult.new(1)
+
+        begin
+          if timeout
+            select
+            when @processor.send({packet, result.as(SendResult?)})
+              # queued
+            when ::timeout(timeout)
+              raise TimeoutError.new("timeout queueing #{packet.id} after #{timeout}")
+            end
+          else
+            @processor.send({packet, result.as(SendResult?)})
+          end
+        rescue ::Channel::ClosedError
+          raise NotConnectedError.new("client has disconnected")
+        end
+
+        error = if timeout
+                  select
+                  when value = result.receive
+                    value
+                  when ::timeout(timeout)
+                    raise TimeoutError.new("timeout sending #{packet.id} after #{timeout}")
+                  end
+                else
+                  result.receive
+                end
+
+        raise error if error
+      end
+
+      # Queues a packet without waiting for the write to complete. Used for
+      # acknowledgements generated while handling an inbound message, so the
+      # dispatch fiber is never blocked behind the socket
+      protected def transmit_async(packet : Request) : Nil
+        @processor.send({packet, nil.as(SendResult?)})
+      rescue ::Channel::ClosedError
+        # disconnected, nothing to acknowledge
+      end
+
       def closed?
         @transport.closed?
       end
 
-      def connect(
-        username : String? = nil,
-        password : String? = nil,
-        keep_alive : Int32 = 60,
-        client_id : String = MQTT.generate_client_id,
-        clean_start : Bool = true,
-        will_flag : Bool = false,
-        will_qos : Int32 | QoS = 0,
-        will_retain : Bool = false,
-        will_topic : String? = nil,
-        will_payload : String? = nil
-      )
-        if connecting = @waiting_connect
-          return connecting.get
-        end
-
-        # Negotiate the MQTT layer
+      # Negotiates the MQTT layer
+      private def build_connect(
+        username : String?,
+        password : String?,
+        keep_alive : Int32,
+        client_id : String,
+        clean_start : Bool,
+        will_flag : Bool,
+        will_qos : Int32 | QoS,
+        will_retain : Bool,
+        will_topic : String?,
+        will_payload : (String | Bytes)?,
+      ) : Connect
         connect = Connect.new
         connect.id = MQTT::RequestType::Connect
         connect.keep_alive_seconds = keep_alive.to_u16
@@ -178,15 +302,61 @@ module MQTT
         connect.will_topic = will_topic if will_topic
         connect.will_payload = will_payload if will_payload
         connect.packet_length = connect.calculate_length
+        connect
+      end
 
-        Log.debug { "TCP connection established, sending connect packet" }
+      def connect(
+        username : String? = nil,
+        password : String? = nil,
+        keep_alive : Int32 = 60,
+        client_id : String = MQTT.generate_client_id,
+        clean_start : Bool = true,
+        will_flag : Bool = false,
+        will_qos : Int32 | QoS = 0,
+        will_retain : Bool = false,
+        will_topic : String? = nil,
+        will_payload : (String | Bytes)? = nil,
+        timeout : Time::Span? = @timeout,
+        keep_alive_active : Bool = true,
+      )
+        if will_flag && (will_topic.nil? || will_topic.empty?)
+          # MQTT-3.1.3-10, a zero length will topic is a protocol violation
+          raise ArgumentError.new("will_topic is required when will_flag is set")
+        end
 
-        promise = Promise::DeferredPromise(Connack).new
-        @message_lock.synchronize { @waiting_connect = promise }
-        @processor.send({connect, promise})
+        pending = Pending(Connack).new
+        existing = @message_lock.synchronize do
+          if current = @waiting_connect
+            current
+          else
+            @waiting_connect = pending
+            nil
+          end
+        end
 
-        ack = promise.get
-        @transport.close! unless ack.success?
+        # a connection attempt is already in flight, wait on that one
+        return existing.get(timeout, "connection acknowledgement") if existing
+
+        connect = build_connect(
+          username, password, keep_alive, client_id, clean_start,
+          will_flag, will_qos, will_retain, will_topic, will_payload
+        )
+
+        Log.debug { "transport connection established, sending connect packet" }
+
+        ack = begin
+          transmit(connect, timeout)
+          pending.get(timeout, "connection acknowledgement")
+        ensure
+          # cleared either way so a failed connection can be retried
+          @message_lock.synchronize { @waiting_connect = nil if @waiting_connect == pending }
+        end
+
+        if ack.success?
+          start_keep_alive(keep_alive) if keep_alive_active
+        else
+          @transport.close!
+        end
         ack
       end
 
@@ -198,10 +368,8 @@ module MQTT
           disconnect.id = MQTT::RequestType::Disconnect
           disconnect.packet_length = disconnect.calculate_length
 
-          promise = Promise::DeferredPromise(Bool).new
-          @processor.send({disconnect, promise})
           begin
-            promise.get
+            transmit(disconnect, @timeout)
           rescue
             # ignore failures here, we'll just close the transport
           end
@@ -210,7 +378,64 @@ module MQTT
         @transport.close!
       end
 
-      def publish(topic : String, payload = "", retain : Bool = false, qos : QoS = QoS::FireAndForget)
+      # Sends a PINGREQ and waits for the broker's PINGRESP
+      def ping(timeout : Time::Span? = @timeout) : Nil
+        ping = Pingreq.new
+        ping.id = MQTT::RequestType::Pingreq
+        ping.packet_length = ping.calculate_length
+
+        pending = Pending(EmptyPacket).new
+        @message_lock.synchronize { @waiting_ping << pending }
+
+        begin
+          transmit(ping, timeout)
+          pending.get(timeout, "ping response")
+        ensure
+          @message_lock.synchronize { @waiting_ping.delete(pending) }
+        end
+        nil
+      end
+
+      # Sends a PINGREQ whenever the link has been idle, so the broker doesn't
+      # drop us for exceeding the keep alive interval we negotiated
+      protected def start_keep_alive(seconds : Int32) : Nil
+        return if seconds <= 0
+        spawn(name: "mqtt-keepalive") { keep_alive!(seconds) }
+      end
+
+      protected def keep_alive!(seconds : Int32) : Nil
+        # ping at 75% of the interval so a response has time to arrive
+        interval = (seconds * 0.75).seconds
+
+        loop do
+          select
+          when @wait_close.receive?
+            break
+          when ::timeout(interval)
+            # time to check on the connection
+          end
+          break if closed?
+
+          # no need to ping a link that has been busy
+          next if (MQTT.monotonic - @last_activity) < interval
+
+          begin
+            ping(timeout: interval)
+          rescue error
+            Log.warn(exception: error) { "keep alive ping failed, closing connection" }
+            @transport.close!
+            break
+          end
+        end
+      end
+
+      def publish(
+        topic : String,
+        payload = "",
+        retain : Bool = false,
+        qos : QoS = QoS::FireAndForget,
+        timeout : Time::Span? = @timeout,
+      )
         raise ArgumentError.new("Topic name cannot be empty") if topic.empty?
 
         publish = Publish.new
@@ -219,169 +444,242 @@ module MQTT
         publish.topic = topic
         publish.retain = retain
         publish.payload = payload
-        publish.packet_length = publish.calculate_length
 
-        if publish.qos?
-          promise = Promise::DeferredPromise(Puback).new
-          publish.message_id = @message_lock.synchronize do
-            next_id = next_message_id
-            @waiting_ack[next_id] = promise
-            next_id
+        case qos
+        in QoS::FireAndForget
+          publish.packet_length = publish.calculate_length
+          transmit(publish, timeout)
+        in QoS::BrokerReceived
+          # PUBLISH -> PUBACK
+          reserve_ack(RequestType::Puback) do |id, pending|
+            publish.message_id = id
+            publish.packet_length = publish.calculate_length
+            transmit(publish, timeout)
+            pending.get(timeout, "PUBACK")
           end
-        else
-          promise = Promise::DeferredPromise(Bool).new
+        in QoS::SubscribersReceived
+          # PUBLISH -> PUBREC -> PUBREL -> PUBCOMP
+          message_id = reserve_ack(RequestType::Pubrec) do |id, pending|
+            publish.message_id = id
+            publish.packet_length = publish.calculate_length
+            transmit(publish, timeout)
+            pending.get(timeout, "PUBREC")
+            id
+          end
+
+          release = Pubrel.new
+          release.id = MQTT::RequestType::Pubrel
+          release.qos = required_qos(MQTT::RequestType::Pubrel)
+          release.message_id = message_id
+          release.packet_length = release.calculate_length
+
+          pending = Pending(Ack).new
+          @message_lock.synchronize { @waiting_ack[{RequestType::Pubcomp, message_id}] = pending }
+          begin
+            transmit(release, timeout)
+            pending.get(timeout, "PUBCOMP")
+          ensure
+            @message_lock.synchronize { @waiting_ack.delete({RequestType::Pubcomp, message_id}) }
+          end
         end
 
-        @processor.send({publish, promise})
-        promise.get
         self
+      end
+
+      # Allocates a message id, registers the expected response and guarantees
+      # the registration is cleaned up however the block exits
+      private def reserve_ack(expecting : RequestType, &)
+        pending = Pending(Ack).new
+        message_id = @message_lock.synchronize do
+          id = next_message_id
+          @waiting_ack[{expecting, id}] = pending
+          id
+        end
+
+        begin
+          yield message_id, pending
+        ensure
+          @message_lock.synchronize { @waiting_ack.delete({expecting, message_id}) }
+        end
+
+        message_id
+      end
+
+      # An empty filter is not a valid topic, treat it as the root topic
+      private def normalise_filter(filter : String) : String
+        filter.empty? ? "/" : filter
+      end
+
+      # SUBSCRIBE, UNSUBSCRIBE and PUBREL must be sent with QoS 1
+      # (MQTT-3.8.1-1, MQTT-3.10.1-1 and MQTT-3.6.1-1)
+      private def required_qos(type : RequestType) : QoS
+        type.requires_qos? ? QoS::BrokerReceived : QoS::FireAndForget
       end
 
       # http://www.steves-internet-guide.com/understanding-mqtt-topics/
-      def subscribe(topics : Hash(String, Tuple(QoS, Proc(String, Bytes, Nil))))
-        # Build the message
+      def subscribe(topics : Hash(String, Tuple(QoS, Proc(String, Bytes, Nil))), timeout : Time::Span? = @timeout)
+        # MQTT-3.8.3-3, a SUBSCRIBE must carry at least one topic filter
+        raise ArgumentError.new("at least one topic filter is required") if topics.empty?
+
+        # Normalise once so the callback registry, the QoS registry and the
+        # wire payload all agree on the key
+        requested = {} of String => Tuple(QoS, Proc(String, Bytes, Nil))
+        topics.each { |filter, config| requested[normalise_filter(filter)] = config }
+        filters = requested.keys
+
+        # NOTE:: every requested filter is sent, even one we're already
+        # subscribed to. Filtering the packet but not the response handling is
+        # what used to misalign the return codes against the requested topics
         sub = Subscribe.new
         sub.id = MQTT::RequestType::Subscribe
-        sub.qos = QoS::BrokerReceived
-        sub.message_id = @message_lock.synchronize { next_message_id }
+        sub.qos = required_qos(MQTT::RequestType::Subscribe)
+        sub.topics = requested.transform_values { |(qos, _)| qos }
 
-        # Don't re-subscribe to a topic unless it has a greater QoS
-        to_configure = {} of String => QoS
-        @message_lock.synchronize do
-          topics.each do |key, value|
-            qos = value[0]
-            key = "/" if key.empty?
+        pending = Pending(Suback).new
+        message_id = @message_lock.synchronize do
+          id = next_message_id
+          @waiting_suback[id] = pending
 
-            # This check requires the lock
-            if existing_qos = @subscription_qos[key]?
-              to_configure[key] = qos if existing_qos < qos
-            else
-              to_configure[key] = qos
-            end
+          # Update the callbacks
+          requested.each do |filter, (_, proc)|
+            (@subscription_cbs[filter] ||= [] of Proc(String, Bytes, Nil)) << proc
           end
+
+          id
         end
-        sub.topics = to_configure
+
+        sub.message_id = message_id
         sub.packet_length = sub.calculate_length
 
         begin
-          # Configure the request
-          promise = Promise::DeferredPromise(Suback).new
-          sub.message_id = @message_lock.synchronize do
-            next_id = next_message_id
-            @waiting_suback[next_id] = promise
-
-            # Update the callbacks
-            topics.each do |topic, (_, proc)|
-              @subscription_cbs[topic] << proc
-            end
-
-            # Return the message id we were after
-            next_id
-          end
-
           # Make the request and wait for the response
-          @processor.send({sub, promise})
-          ack = promise.get
-          return_codes = ack.return_codes
+          transmit(sub, timeout)
+          ack = pending.get(timeout, "SUBACK")
+          codes = ack.raw_return_codes
 
-          # Configure the callback QoS
-          index = 0
-          @message_lock.synchronize do
-            topics.each_key do |topic|
-              ack_qos = return_codes[index]
-              @subscription_qos[topic] = ack_qos
-              index += 1
-            end
+          if codes.size != filters.size
+            raise SubscriptionError.new("broker returned #{codes.size} return codes for #{filters.size} topic filters")
           end
-        rescue error
-          Log.error(exception: error) { "error subscribing to topics\n#{error.inspect_with_backtrace}" }
 
-          # Remove callbacks that failed to configure
+          # Configure the callback QoS, tracking any filter the broker rejected
+          rejected = [] of String
           @message_lock.synchronize do
-            topics.each do |topic, (_, proc)|
-              array = @subscription_cbs[topic]
-              array.delete(proc)
-              if array.empty?
-                @subscription_cbs.delete(topic)
-                @subscription_qos.delete(topic)
+            filters.each_with_index do |filter, index|
+              code = codes[index]
+              if ack.failure?(code)
+                rejected << filter
+              else
+                @subscription_qos[filter] = QoS.from_value(code)
               end
             end
           end
+
+          unless rejected.empty?
+            remove_callbacks(requested, only: rejected)
+            raise SubscriptionError.new("broker rejected subscription to #{rejected.join(", ")}")
+          end
+        rescue error
+          Log.error(exception: error) { "error subscribing to topics" }
+
+          # Remove callbacks that failed to configure
+          remove_callbacks(requested)
+
+          # NOTE:: this used to be swallowed, which reported success for a
+          # subscription that was never established
+          raise error
+        ensure
+          @message_lock.synchronize { @waiting_suback.delete(message_id) }
         end
 
         self
       end
 
-      def subscribe(*topics, qos : QoS = QoS::FireAndForget, &callback : Proc(String, Bytes, Nil))
+      # Undoes the callback registration performed by `subscribe`
+      private def remove_callbacks(
+        requested : Hash(String, Tuple(QoS, Proc(String, Bytes, Nil))),
+        only : Array(String)? = nil,
+      ) : Nil
+        @message_lock.synchronize do
+          requested.each do |filter, (_, proc)|
+            next if only && !only.includes?(filter)
+            next unless array = @subscription_cbs[filter]?
+
+            array.delete(proc)
+            if array.empty?
+              @subscription_cbs.delete(filter)
+              @subscription_qos.delete(filter)
+            end
+          end
+        end
+      end
+
+      def subscribe(*topics, qos : QoS = QoS::FireAndForget, timeout : Time::Span? = @timeout, &callback : Proc(String, Bytes, Nil))
         mapped_topics = {} of String => Tuple(QoS, Proc(String, Bytes, Nil))
         topics.to_a.flatten.map(&.to_s).uniq!.each do |topic|
           mapped_topics[topic] = {qos, callback}
         end
-        subscribe(mapped_topics)
+        subscribe(mapped_topics, timeout)
         self
       end
 
-      def unsubscribe(*topics)
-        topics = topics.to_a.flatten.map(&.to_s).uniq!
-        @message_lock.synchronize do
-          topics.each do |topic|
-            @subscription_cbs.delete(topic)
-            @subscription_qos.delete(topic)
-          end
-        end
-        perform_unsubscribe(topics)
-        self
-      end
-
-      def unsubscribe(topic : String, callback : Proc(String, Bytes, Nil))
-        found = false
+      def unsubscribe(*topics, timeout : Time::Span? = @timeout)
+        filters = topics.to_a.flatten.map { |topic| normalise_filter(topic.to_s) }.uniq!
+        return self if filters.empty?
 
         @message_lock.synchronize do
-          array = @subscription_cbs[topic]
-          cb = array.delete(proc)
-          if array.empty?
-            found = !!cb
-            @subscription_cbs.delete(topic)
-            @subscription_qos.delete(topic)
+          filters.each do |filter|
+            @subscription_cbs.delete(filter)
+            @subscription_qos.delete(filter)
           end
         end
-        perform_unsubscribe([topic]) if found
+        perform_unsubscribe(filters, timeout)
         self
       end
 
-      protected def perform_unsubscribe(topics : Array(String)) : Nil
+      # Removes a single callback, only unsubscribing once the last callback
+      # for the filter has been removed
+      def unsubscribe(topic : String, callback : Proc(String, Bytes, Nil), timeout : Time::Span? = @timeout)
+        filter = normalise_filter(topic)
+        removed = false
+
+        @message_lock.synchronize do
+          if array = @subscription_cbs[filter]?
+            removed = !array.delete(callback).nil?
+            if array.empty?
+              @subscription_cbs.delete(filter)
+              @subscription_qos.delete(filter)
+            else
+              # other callbacks still want this filter
+              removed = false
+            end
+          end
+        end
+
+        perform_unsubscribe([filter], timeout) if removed
+        self
+      end
+
+      protected def perform_unsubscribe(topics : Array(String), timeout : Time::Span? = @timeout) : Nil
         sub = Unsubscribe.new
         sub.id = MQTT::RequestType::Unsubscribe
-        sub.qos = QoS::BrokerReceived
+        sub.qos = required_qos(MQTT::RequestType::Unsubscribe)
         sub.topics = topics
-        sub.packet_length = sub.calculate_length
 
-        promise = Promise::DeferredPromise(Unsuback).new
-        sub.message_id = @message_lock.synchronize do
-          next_id = next_message_id
-          @waiting_ack[next_id] = promise
-          next_id
+        reserve_ack(RequestType::Unsuback) do |id, pending|
+          sub.message_id = id
+          sub.packet_length = sub.calculate_length
+          transmit(sub, timeout)
+          pending.get(timeout, "UNSUBACK")
         end
-        @processor.send({sub, promise})
-        promise.get
-      end
-
-      def ping : Nil
-        ping = Pingreq.new
-        ping.id = MQTT::RequestType::Pingreq
-        ping.packet_length = ping.calculate_length
-
-        promise = Promise::DeferredPromise(Bool).new
-        @processor.send({ping, promise})
-        promise.get
       end
 
       def parse_message(io)
+        @last_activity = MQTT.monotonic
         message_type = MQTT.peek_type(io)
+
         case message_type
         when RequestType::Connack
           packet = io.read_bytes Connack
-          packet.packet_length
           Log.debug { "received #{packet.inspect}" }
           if connect_waiting = @message_lock.synchronize { @waiting_connect }
             connect_waiting.resolve(packet)
@@ -390,68 +688,99 @@ module MQTT
           end
         when RequestType::Suback
           packet = io.read_bytes Suback
-          packet.packet_length
           Log.debug { "received #{packet.inspect}" }
-          if promise = @message_lock.synchronize { @waiting_suback.delete(packet.message_id) }
-            promise.resolve(packet)
+          if pending = @message_lock.synchronize { @waiting_suback[packet.message_id]? }
+            pending.resolve(packet)
           else
             Log.warn { "unexpected subscription acknowledgement, id #{packet.message_id}" }
           end
-        when RequestType::Puback, RequestType::Unsuback, RequestType::Pubrec, RequestType::Pubrel, RequestType::Pubcomp
+        when RequestType::Pubrel
+          # completes an inbound QoS 2 delivery
           packet = io.read_bytes Ack
-          packet.packet_length
           Log.debug { "received #{packet.inspect}" }
-          if promise = @message_lock.synchronize { @waiting_ack.delete(packet.message_id) }
-            promise.resolve(packet)
+          release_inbound(packet.message_id)
+        when RequestType::Puback, RequestType::Unsuback, RequestType::Pubrec, RequestType::Pubcomp
+          packet = io.read_bytes Ack
+          Log.debug { "received #{packet.inspect}" }
+          if pending = @message_lock.synchronize { @waiting_ack[{message_type, packet.message_id}]? }
+            pending.resolve(packet)
           else
             Log.warn { "unexpected #{message_type}, id #{packet.message_id}" }
           end
         when RequestType::Pingresp
-          # Do nothing
           Log.debug { "received ping response" }
           @last_ping_response = Time.utc
+          packet = io.read_bytes EmptyPacket
+          if pending = @message_lock.synchronize { @waiting_ping.shift? }
+            pending.resolve(packet)
+          end
         when RequestType::Publish
           packet = io.read_bytes Publish
-          packet.packet_length
           Log.debug { "received publish request #{packet.inspect}" }
           publish_received(packet)
         else
-          Log.error { "invalid message type received #{message_type}" }
+          raise ProtocolError.new("unexpected message type received #{message_type}")
         end
       rescue e
-        Log.error(exception: e) { "failed to parse message: #{io.to_slice}" }
+        Log.error(exception: e) { "failed to parse message" }
         @transport.close!
       end
 
       def publish_received(pub)
-        topic = pub.topic
-        payload = pub.payload
+        case pub.qos
+        in QoS::FireAndForget
+          dispatch(pub.topic, pub.payload)
+        in QoS::BrokerReceived
+          acknowledge(RequestType::Puback, pub.message_id)
+          dispatch(pub.topic, pub.payload)
+        in QoS::SubscribersReceived
+          # MQTT-4.3.3, hold the message until the broker releases it with
+          # PUBREL so that a redelivery can't be dispatched twice
+          duplicate = @message_lock.synchronize do
+            already_held = @inbound_qos2.has_key?(pub.message_id)
+            @inbound_qos2[pub.message_id] = pub
+            already_held
+          end
+          Log.debug { "duplicate QoS 2 publish #{pub.message_id}, awaiting release" } if duplicate
+          acknowledge(RequestType::Pubrec, pub.message_id)
+        end
+      end
 
-        # Send the ack
-        if pub.qos?
-          begin
-            ack = Puback.new
-            ack.id = MQTT::RequestType::Puback
-            ack.message_id = pub.message_id
-            ack.packet_length = ack.calculate_length
-            promise = Promise::DeferredPromise(Bool).new
+      # Delivers a held QoS 2 message and completes the handshake
+      protected def release_inbound(message_id : UInt16) : Nil
+        held = @message_lock.synchronize { @inbound_qos2.delete(message_id) }
+        acknowledge(RequestType::Pubcomp, message_id)
 
-            @processor.send({ack, promise})
-            promise.get
-          rescue error
-            Log.error(exception: error) { "failed to send ack for #{pub.message_id}" }
+        if held
+          dispatch(held.topic, held.payload)
+        else
+          Log.warn { "unexpected publish release, id #{message_id}" }
+        end
+      end
+
+      protected def acknowledge(type : RequestType, message_id : UInt16) : Nil
+        ack = Ack.new
+        ack.id = type
+        ack.qos = required_qos(type)
+        ack.message_id = message_id
+        ack.packet_length = ack.calculate_length
+        transmit_async(ack)
+      end
+
+      # Invokes any callback whose filter matches the topic
+      protected def dispatch(topic : String, payload : Bytes) : Nil
+        # snapshot under the lock, the callbacks themselves run outside of it
+        matched = @message_lock.synchronize do
+          @subscription_cbs.compact_map do |filter, callbacks|
+            {filter, callbacks.dup} if Client.topic_matches(filter, topic)
           end
         end
 
-        @subscription_cbs.each do |filter, callbacks|
-          if MQTT::V3::Client.topic_matches(filter, topic)
-            callbacks.each do |callback|
-              begin
-                callback.call(topic, payload)
-              rescue error
-                Log.error(exception: error) { "callback failed #{filter} for #{topic}" }
-              end
-            end
+        matched.each do |(filter, callbacks)|
+          callbacks.each do |callback|
+            callback.call(topic, payload)
+          rescue error
+            Log.error(exception: error) { "callback failed #{filter} for #{topic}" }
           end
         end
       end

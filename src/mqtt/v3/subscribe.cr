@@ -23,7 +23,7 @@ module MQTT
 
       # Will continue reading data into the array until the
       #  sum of the topics array + 2 message_id bytes equals the total size
-      field topics : Array(SubTopic), read_next: ->{
+      field topics : Array(SubTopic), read_next: -> {
         calculate_length < packet_length
       }
 
