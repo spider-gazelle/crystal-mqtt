@@ -25,6 +25,10 @@ class FakeBroker
   # Raised by the next transport build, to simulate a broker that is still down
   property refuse_connections : Int32 = 0
 
+  # Retained messages, exactly one per topic, surviving across connections the
+  # way a real broker holds them
+  getter retained = {} of String => Tuple(Bytes, MQTT::QoS)
+
   def transport : FakeTransport
     @transports.last? || build_transport
   end
@@ -57,15 +61,46 @@ class FakeBroker
   end
 
   # Pushes a publish out to the client
-  def publish(topic : String, payload : String = "", qos : MQTT::QoS = MQTT::QoS::FireAndForget, message_id : UInt16 = 1_u16) : Nil
+  def publish(topic : String, payload : String = "", qos : MQTT::QoS = MQTT::QoS::FireAndForget, message_id : UInt16 = 1_u16, retain : Bool = false) : Nil
     packet = MQTT::V3::Publish.new
     packet.id = MQTT::RequestType::Publish
     packet.qos = qos
     packet.topic = topic
     packet.payload = payload
+    packet.retain = retain
     packet.message_id = message_id unless qos.fire_and_forget?
     packet.packet_length = packet.calculate_length
     transport.receive_packet(packet)
+  end
+
+  # Delivers whatever we have retained for a filter, the way a broker does
+  # immediately after granting a subscription
+  private def deliver_retained(transport : FakeTransport, filter : String) : Nil
+    retained.each do |topic, (payload, qos)|
+      next unless MQTT.topic_matches?(filter, topic)
+
+      packet = MQTT::V3::Publish.new
+      packet.id = MQTT::RequestType::Publish
+      packet.qos = MQTT::QoS::FireAndForget
+      packet.topic = topic
+      packet.payload = payload
+      # MQTT-3.3.1-8, a message sent because of a new subscription is flagged
+      packet.retain = true
+      packet.packet_length = packet.calculate_length
+      transport.receive_packet(packet)
+    end
+  end
+
+  # MQTT-3.3.1-5..7, a retained publish replaces what we hold for the topic and
+  # a zero length payload clears it
+  private def store_retained(pub : MQTT::V3::Publish) : Nil
+    return unless pub.retain
+
+    if pub.payload.empty?
+      retained.delete(pub.topic)
+    else
+      retained[pub.topic] = {pub.payload.dup, pub.qos}
+    end
   end
 
   # Sends the PUBREL that completes an inbound QoS 2 delivery
@@ -101,11 +136,15 @@ class FakeBroker
       ack.raw_return_codes = suback_codes || sub.topics.map(&.qos.to_u8)
       ack.packet_length = ack.calculate_length
       transport.receive_packet(ack)
+
+      # retained messages follow the SUBACK
+      sub.topics.each { |topic| deliver_retained(transport, topic.filter) }
     when .unsubscribe?
       sub = reparse(packet, MQTT::V3::Unsubscribe)
       send_ack(transport, MQTT::RequestType::Unsuback, sub.message_id)
     when .publish?
       pub = reparse(packet, MQTT::V3::Publish)
+      store_retained(pub)
       case pub.qos
       when .broker_received?
         send_ack(transport, MQTT::RequestType::Puback, pub.message_id)
