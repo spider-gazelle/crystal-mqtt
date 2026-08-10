@@ -1,5 +1,35 @@
 # Changelog
 
+## 2.0.1
+
+Two fixes found by upgrading a real consumer. **2.0.0 should be skipped.**
+
+- **Requiring an entry point directly did not compile.** Three of the four
+  documented entry points were broken, including `require "mqtt/v3/client"`,
+  which is what every 1.x user has:
+
+  ```
+  require "mqtt"           ok
+  require "mqtt/client"    undefined constant Properties
+  require "mqtt/v5/client" undefined constant Properties
+  require "mqtt/v3/client" undefined constant MQTT::ClientBase
+  ```
+
+  Leaf files required the root aggregator while the aggregator required the
+  clients, so starting anywhere but the root re-entered a half loaded module.
+  The module definitions now live in `mqtt/base.cr`, which requires nothing from
+  the shard. Separately `v3/client.cr` relied on the aggregator's glob for the
+  packet classes it is built from.
+
+  The suite never caught it because `spec_helper` requires the root first, which
+  hides any ordering problem. There is now a spec that compiles each entry point
+  on its own, the way a consumer sees it.
+
+- **A client kicked off by `SessionTakenOver` reconnected**, which kicks the
+  other client off, which reconnects and kicks the first back. Two clients
+  sharing a client id fought indefinitely. Reconnection is new in 2.0, so
+  nothing surfaced this before.
+
 ## 2.0.0
 
 MQTT 5.0 support, alongside the existing 3.1.1 client.
