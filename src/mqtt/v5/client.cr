@@ -97,9 +97,31 @@ module MQTT
       # Why the broker closed the connection, when it said
       getter disconnect_reason : ReasonCode? = nil
 
-      # Supplies the next authentication step for `authentication_method`.
-      # Receives the broker's data and returns ours, or nil to stop
-      property authenticator : Proc(Bytes?, Bytes?)? = nil
+      # Drives MQTT-4.12 enhanced authentication. The shard deliberately ships
+      # no SASL mechanism of its own: name the method the broker expects and
+      # supply the exchange, which is called with the broker's data (nil for the
+      # first step) and returns ours
+      #
+      # ```
+      # client.authenticator = MQTT::V5::Authenticator.new("SCRAM-SHA-1") do |challenge|
+      #   challenge.nil? ? initial_response : answer(challenge)
+      # end
+      # ```
+      class Authenticator
+        getter method : String
+
+        def initialize(@method : String, &@exchange : Bytes? -> Bytes?)
+        end
+
+        def challenge(data : Bytes?) : Bytes?
+          @exchange.call(data)
+        end
+      end
+
+      property authenticator : Authenticator? = nil
+
+      # Where the broker told us to go instead, from a CONNACK or a DISCONNECT
+      getter server_reference : String? = nil
 
       @connect_options : NamedTuple(
         username: String?,
@@ -260,6 +282,14 @@ module MQTT
         packet.receive_maximum = receive_maximum
         packet.maximum_packet_size = @max_packet_size
 
+        # MQTT-4.12, the CONNECT names the method and carries the first step.
+        # The broker then either accepts, or challenges with AUTH packets that
+        # `authenticate` answers while this call is still waiting for its CONNACK
+        if auth = @authenticator
+          packet.authentication_method = auth.method
+          packet.authentication_data = auth.challenge(nil)
+        end
+
         if will_flag
           packet.will_flag = true
           packet.will_qos = will_qos.is_a?(QoS) ? will_qos : QoS.from_value(will_qos)
@@ -277,6 +307,7 @@ module MQTT
       private def adopt(ack : Connack) : Nil
         @assigned_client_id = ack.assigned_client_identifier
         @session_expiry_interval = ack.session_expiry_interval
+        @server_reference = ack.server_reference || @server_reference
         @server_receive_maximum = ack.receive_maximum
         @server_maximum_qos = ack.maximum_qos
         @server_maximum_packet_size = ack.maximum_packet_size
@@ -762,15 +793,32 @@ module MQTT
         Log.warn { "broker closed the connection: #{packet.reason_description}#{detail ? " (#{detail})" : ""}" }
 
         if reference = packet.server_reference
+          @server_reference = reference
           Log.warn { "broker referred us to #{reference}" }
         end
 
         @transport.close!
       end
 
-      # Enhanced authentication, MQTT-4.12. The broker challenges, the
-      # authenticator answers, until it is satisfied or gives up
+      # MQTT-4.12. The broker challenges, the authenticator answers, until the
+      # broker is satisfied. During `connect` this runs while that call is still
+      # waiting for its CONNACK; afterwards it completes a `reauthenticate`
       protected def authenticate(packet : Auth) : Nil
+        case packet.reason_code
+        when ReasonCode::Success
+          # the broker is satisfied, which only happens for re-authentication.
+          # a first authentication is completed by the CONNACK instead
+          unless resolve(RequestType::Auth, 0_u16, packet)
+            Log.debug { "authentication succeeded" }
+          end
+        when ReasonCode::ContinueAuthentication
+          continue_authentication(packet)
+        else
+          Log.warn { "unexpected AUTH reason #{packet.reason_description}" }
+        end
+      end
+
+      private def continue_authentication(packet : Auth) : Nil
         handler = @authenticator
         unless handler
           Log.error { "broker requested authentication but no authenticator is configured" }
@@ -778,19 +826,43 @@ module MQTT
           return
         end
 
-        response = handler.call(packet.authentication_data)
-        unless response
-          Log.debug { "authenticator produced no further data" }
-          return
-        end
+        response = handler.challenge(packet.authentication_data)
 
         reply = Auth.new
         reply.id = MQTT::RequestType::Auth
         reply.reason_code = ReasonCode::ContinueAuthentication
-        reply.authentication_method = packet.authentication_method
+        reply.authentication_method = handler.method
         reply.authentication_data = response
         reply.packet_length = reply.calculate_length
+
+        # sent without waiting, the exchange continues through parse_message
         transmit_async(reply)
+      end
+
+      # Re-authenticates an established connection, MQTT-4.12.1. The broker
+      # answers with further challenges and finally an AUTH carrying Success,
+      # or drops the connection
+      def reauthenticate(timeout : Time::Span? = @timeout) : Nil
+        handler = @authenticator
+        raise Error.new("no authenticator is configured") unless handler
+
+        packet = Auth.new
+        packet.id = MQTT::RequestType::Auth
+        packet.reason_code = ReasonCode::ReAuthenticate
+        packet.authentication_method = handler.method
+        packet.authentication_data = handler.challenge(nil)
+        packet.packet_length = packet.calculate_length
+
+        # AUTH carries no packet identifier, so it reserves the one identifier
+        # that is never allocated. This also means the base rejects it on close
+        pending = expect(RequestType::Auth, 0_u16)
+        begin
+          transmit(packet, timeout)
+          pending.get(timeout, "AUTH")
+        ensure
+          forget(RequestType::Auth, 0_u16)
+        end
+        nil
       end
 
       def publish_received(pub : Publish)
