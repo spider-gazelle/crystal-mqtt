@@ -1,4 +1,4 @@
-require "../mqtt"
+require "./base"
 
 module MQTT
   # A single-shot slot for a response we're expecting from the broker.

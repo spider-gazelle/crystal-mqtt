@@ -1,4 +1,4 @@
-require "../mqtt"
+require "./base"
 require "tokenizer"
 
 module MQTT

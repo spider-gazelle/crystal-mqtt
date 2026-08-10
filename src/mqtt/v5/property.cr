@@ -1,5 +1,5 @@
 require "bindata"
-require "../../mqtt"
+require "../base"
 require "../variable_byte_integer"
 
 module MQTT

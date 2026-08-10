@@ -1,4 +1,4 @@
-require "../mqtt"
+require "./base"
 
 module MQTT
   # Does a topic name match a subscription filter?

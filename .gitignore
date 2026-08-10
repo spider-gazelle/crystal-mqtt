@@ -7,3 +7,4 @@ app
 .DS_Store
 bin
 tasks
+.entry_point_check.cr

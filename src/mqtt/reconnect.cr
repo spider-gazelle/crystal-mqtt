@@ -1,4 +1,4 @@
-require "../mqtt"
+require "./base"
 
 module MQTT
   # Controls how a client re-establishes a connection that dropped

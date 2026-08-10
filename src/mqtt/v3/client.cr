@@ -1,5 +1,10 @@
 require "../client_base"
 
+# NOTE:: the packet classes this client is built from. It used to rely on the
+# root aggregator's glob to pull them in, which meant requiring this file
+# directly — the documented entry point — left them undefined
+require "./*"
+
 module MQTT
   module V3
     # https://test.mosquitto.org/

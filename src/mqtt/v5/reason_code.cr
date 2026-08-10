@@ -1,4 +1,4 @@
-require "../../mqtt"
+require "../base"
 
 module MQTT
   module V5

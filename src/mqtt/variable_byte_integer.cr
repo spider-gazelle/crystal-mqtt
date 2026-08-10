@@ -1,4 +1,4 @@
-require "../mqtt"
+require "./base"
 
 module MQTT
   # MQTT encodes lengths as a variable byte integer: seven bits of payload per
