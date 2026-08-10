@@ -1,5 +1,61 @@
 # Changelog
 
+## 1.4.0
+
+MQTT 5.0 support, alongside the existing 3.1.1 client. Additive — nothing in the
+3.1.1 API changed, and its specs were untouched throughout.
+
+### Added
+
+- **`MQTT::V5::Client`**, a conformant 5.0 client. Properties on every packet,
+  reason codes on every acknowledgement, subscription options, topic aliases,
+  flow control, enhanced authentication and server initiated disconnect.
+- **`MQTT::Client`**, which connects as 5.0 and falls back to 3.1.1 when the
+  broker will not take it, exposing what the two protocols have in common.
+  Negotiation happens once; reconnects go straight back at the agreed version.
+
+  A broker rejecting the version closes the connection, so this takes a
+  transport factory rather than a transport.
+- **The retain flag reaches subscribers.** It was parsed and then dropped, so a
+  subscriber could not tell stored state from a live update — the distinction
+  retained messages exist to make. Callbacks may now take a third `retained`
+  parameter. Not a breaking change: a shorter block still satisfies the longer
+  block restriction, and the explicit `Proc` overloads take either shape.
+- 5.0 subscription options: No Local, Retain As Published, Retain Handling and
+  subscription identifiers, with inbound messages routed by identifier where the
+  broker supplies one.
+- Negotiated limits are honoured rather than merely read. Publishes wait for a
+  Receive Maximum slot, oversized packets raise locally, and anything the broker
+  says it cannot do (maximum QoS, retained messages, wildcards, shared
+  subscriptions) is refused before it goes out.
+- Topic aliases in both directions, scoped to a connection.
+- `MQTT::V5::Authenticator` for enhanced authentication. No SASL mechanism is
+  bundled: name the method and supply the exchange. `#reauthenticate` covers
+  re-authentication mid connection.
+- `./test` and `docker-compose.yml`. `./test` finds a broker — one you nominated,
+  a local mosquitto, or docker compose — and is what CI runs, so a green run
+  locally means a green run there.
+
+### Changed
+
+- The fixed header moved to `MQTT::Header`, shared by both versions.
+  `MQTT::V3::Header` remains as an alias.
+- Everything version agnostic — transport lifecycle, framing, the request
+  pipeline, packet identifiers, keep alive, reconnection — moved to
+  `MQTT::ClientBase`. `MQTT::V3::Client` went from 990 lines to 456 with no
+  behaviour change.
+- `MQTT.topic_matches?` is the shared implementation.
+  `MQTT::V3::Client.topic_matches` delegates to it.
+- `MQTT::RequestType` gained `Auth`, which 5.0 adds.
+
+### Internal
+
+- Properties are implemented entirely in bindata. A property's value type is
+  decided by its identifier, which `onlyif` can express by keying off the
+  identifier already read — so there is no hand written codec.
+- The end to end suite runs against real mosquitto on every CI build, including
+  retained message persistence across separate connections.
+
 ## 1.3.0
 
 Bug fixes and robustness work across the V3 client. The public API is unchanged
