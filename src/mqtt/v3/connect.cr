@@ -35,16 +35,23 @@ module MQTT
       MQTT.string client_id
 
       # The topic name to send the Will message to
-      MQTT.string will_topic, onlyif: ->{ will_flag } do
+      MQTT.string will_topic, onlyif: -> { will_flag } do
         self.will_flag = true
       end
 
       # The payload of the Will message
-      MQTT.string will_payload, onlyif: ->{ will_flag }
-      MQTT.string username, onlyif: ->{ has_username } do
+      MQTT.string will_payload, onlyif: -> { will_flag }
+
+      # Will payloads are arbitrary bytes, the field is only typed as a string
+      # because that is how it's length prefixed on the wire
+      def will_payload=(payload : Bytes)
+        self.will_payload = String.new(payload)
+      end
+
+      MQTT.string username, onlyif: -> { has_username } do
         self.has_username = true
       end
-      MQTT.string password, onlyif: ->{ has_password } do
+      MQTT.string password, onlyif: -> { has_password } do
         self.has_password = true
       end
 

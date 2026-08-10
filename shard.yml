@@ -1,5 +1,5 @@
 name: mqtt
-version: 1.2.3
+version: 1.3.0
 
 authors:
   - Stephen von Takach <steve@vontaka.ch>
@@ -8,13 +8,17 @@ authors:
 dependencies:
   bindata:
     github: spider-gazelle/bindata
-  promise:
-    github: spider-gazelle/promise
   tokenizer:
     github: spider-gazelle/tokenizer
 
 development_dependencies:
   ameba:
     github: crystal-ameba/ameba
+    # pinned to master until a release ships with Crystal 1.21 support
+    branch: master
+
+targets:
+  ameba:
+    main: lib/ameba/bin/ameba.cr
 
 license: MIT

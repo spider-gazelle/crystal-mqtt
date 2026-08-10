@@ -32,7 +32,7 @@ module MQTT
 
       def success!
         return self if success?
-        raise(REFUSAL_CODES[return_code]? || "Connection refused: error code #{return_code}")
+        raise ConnectError.new(return_code, REFUSAL_CODES[return_code]? || "Connection refused: error code #{return_code}")
       end
     end
   end # V3

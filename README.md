@@ -23,7 +23,7 @@ A MQTT communication library for crystal lang with pluggable transports
 ```crystal
 require "mqtt/v3/client"
 
-# Create a transport (TCP, UDP, Websocket etc)
+# Create a transport (TCP, Websocket etc)
 tls = OpenSSL::SSL::Context::Client.new
 tls.verify_mode = OpenSSL::SSL::VerifyMode::NONE
 transport = MQTT::Transport::TCP.new("test.mosquitto.org", 8883, tls)
@@ -56,4 +56,148 @@ client.wait_close
 # You can also explicitly disconnect
 client.disconnect
 
+```
+
+### Websockets
+
+```crystal
+transport = MQTT::Transport::Websocket.new("test.mosquitto.org", "/mqtt", 8081, tls)
+client = MQTT::V3::Client.new(transport)
+client.connect
+```
+
+
+## Quality of service
+
+All three levels are supported. `publish` blocks until the handshake for the
+requested level has completed.
+
+| Level | Enum | Behaviour |
+|---|---|---|
+| 0 | `MQTT::QoS::FireAndForget` | returns once the packet has been written |
+| 1 | `MQTT::QoS::BrokerReceived` | waits for `PUBACK` |
+| 2 | `MQTT::QoS::SubscribersReceived` | waits for `PUBREC`, sends `PUBREL`, waits for `PUBCOMP` |
+
+Inbound QoS 2 messages are held until the broker sends `PUBREL`, so a
+redelivery is never dispatched to your callback twice.
+
+
+## Timeouts
+
+Every request that waits on the broker takes a `timeout`, defaulting to
+`MQTT::V3::Client#timeout` (30 seconds). Set it to `nil` to wait indefinitely.
+
+```crystal
+client = MQTT::V3::Client.new(transport, timeout: 5.seconds)
+
+client.publish("some/topic", "hello", qos: MQTT::QoS::BrokerReceived, timeout: 1.second)
+```
+
+The TCP transport also accepts socket level timeouts:
+
+```crystal
+MQTT::Transport::TCP.new("test.mosquitto.org", read_timeout: 30, write_timeout: 10)
+```
+
+
+## Reconnection
+
+Pass a block that builds a transport and the client will re-establish the
+connection whenever it drops, replaying the CONNECT and restoring every
+subscription with its callbacks intact. A socket cannot be reopened, so
+reconnection needs a factory rather than a single transport.
+
+```crystal
+client = MQTT::V3::Client.new(reconnect: MQTT::Reconnect.new) do
+  MQTT::Transport::TCP.new("test.mosquitto.org", 1883)
+end
+
+client.connect(client_id: "my-client")
+client.subscribe("sensors/#") { |topic, payload| handle(topic, payload) }
+# the subscription above survives a dropped connection
+```
+
+Delays back off exponentially and are capped:
+
+```crystal
+MQTT::Reconnect.new(
+  initial_delay: 1.second,
+  max_delay: 30.seconds,
+  max_attempts: nil, # nil retries forever
+)
+```
+
+If the broker reports `session_present` (which requires `clean_start: false`)
+the subscriptions are already held server side and are not sent again. When
+reconnection is exhausted, or you call `disconnect`, the client is `terminated?`
+and `wait_close` returns.
+
+Requests made while the connection is down fail with `MQTT::NotConnectedError` —
+messages are not queued for later delivery.
+
+
+## Keep alive
+
+The client pings automatically whenever the link has been idle, at 75% of the
+keep alive interval negotiated during `connect`, and closes the connection if
+the broker stops responding. Pass `keep_alive_active: false` if you would rather
+call `ping` yourself, or `keep_alive: 0` to disable it at the protocol level.
+
+```crystal
+client.connect(keep_alive: 30)
+```
+
+
+## Transport lifecycle
+
+Constructing a transport does not open a socket; the client connects it once its
+own callbacks are in place, which is what stops data arriving before there is
+anything able to process it. A connection failure therefore surfaces from
+`Client.new`, not from the transport constructor.
+
+```crystal
+transport = MQTT::Transport::TCP.new("test.mosquitto.org", 1883) # no socket yet
+client = MQTT::V3::Client.new(transport)                         # connects here
+```
+
+
+## Errors
+
+Every error raised by this shard is a `MQTT::Error`, so a single rescue is
+enough:
+
+```crystal
+begin
+  client.subscribe("some/topic") { |topic, payload| handle(topic, payload) }
+rescue error : MQTT::Error
+  Log.error(exception: error) { "subscription failed" }
+end
+```
+
+| Error | Raised when |
+|---|---|
+| `MQTT::TimeoutError` | the broker did not respond in time |
+| `MQTT::NotConnectedError` | the transport closed, or was already closed |
+| `MQTT::ConnectError` | the broker refused the connection, carries `return_code` |
+| `MQTT::SubscriptionError` | the broker rejected a topic filter |
+| `MQTT::ProtocolError` | the broker sent something we can't parse |
+| `MQTT::PacketError` | a packet could not be encoded |
+
+
+## Topic matching
+
+`MQTT::V3::Client.topic_matches` implements the wildcard rules, including shared
+subscription (`$share/group/...`) prefixes. Per the specification, `#` and `+`
+at the first level do not match topics beginning with `$` — subscribe to
+`$SYS/#` explicitly to receive broker system topics.
+
+
+## Limits
+
+`max_packet_size` caps how large a single packet from the broker may be,
+defaulting to 8MB. A packet larger than this closes the connection rather than
+being buffered.
+
+```crystal
+client = MQTT::V3::Client.new(transport, max_packet_size: 64_u32 * 1024)
 ```

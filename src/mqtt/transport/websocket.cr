@@ -3,38 +3,60 @@ require "http/web_socket"
 
 module MQTT
   class Transport::Websocket < Transport
-    def initialize(host : String, path : String, port = nil, tls : HTTP::Client::TLSContext = nil, headers = HTTP::Headers.new)
+    # NOTE:: the socket is not opened here. Connecting is deferred to `start`,
+    # which the client calls once it is ready to consume data
+    def initialize(
+      @host : String,
+      @path : String,
+      @port : Int32? = nil,
+      @tls : HTTP::Client::TLSContext = nil,
+      @headers : HTTP::Headers = HTTP::Headers.new,
+    )
       super()
+    end
 
-      # Connect to the server
-      @socket = socket = HTTP::WebSocket.new(host, path, port, tls, headers)
-      socket.on_close { @on_close.try &.call }
-      socket.on_binary { |data| process(data) }
-      socket.on_message { |data| process(data.to_slice) }
-      spawn { socket.run }
+    getter host : String
+    getter path : String
+
+    @socket : HTTP::WebSocket? = nil
+    @closing : Bool = false
+
+    def start : Nil
+      socket = HTTP::WebSocket.new(@host, @path, @port, @tls, @headers)
+      socket.on_binary { |data| process_incoming(data) }
+      socket.on_message { |data| process_incoming(data.to_slice) }
+      @socket = socket
+
+      start_dispatch { process! }
     end
 
     def close! : Nil
-      @socket.close
+      @closing = true
+      @socket.try &.close
     end
 
     def closed? : Bool
-      !!@socket.closed?
+      socket = @socket
+      socket.nil? || socket.closed?
     end
 
     def send(message) : Nil
-      @socket.send(message.to_slice)
+      socket = @socket || raise MQTT::NotConnectedError.new("transport has not been started")
+      socket.send(message.to_slice)
     rescue error : IO::Error
-      @socket.close
+      @socket.try &.close
       raise error
     end
 
-    @socket : HTTP::WebSocket
-
-    protected def process(data : Bytes)
-      @tokenizer.extract(data).each do |bytes|
-        spawn { @on_message.try &.call(bytes) }
-      end
+    protected def process!
+      failure = nil
+      @socket.try &.run
+    rescue error
+      # previously this ran in a bare `spawn` and any failure was lost to an
+      # unhandled fiber exception
+      failure = error unless @closing
+    ensure
+      finish_processing(failure)
     end
   end
 end

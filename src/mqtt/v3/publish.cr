@@ -7,12 +7,20 @@ module MQTT
 
       # The topic name to publish to
       MQTT.string topic
-      field message_id : UInt16, onlyif: ->{ qos? }
+      field message_id : UInt16, onlyif: -> { qos? }
 
       # The data to be published
-      field payload : Bytes, length: ->{
-        len = packet_length - (topic.bytesize + 2)
-        len -= 2 if qos?
+      #
+      # NOTE:: the arithmetic here has to be signed. A malformed packet can
+      # advertise a remaining-length smaller than the fields that precede the
+      # payload, which underflows `UInt32` into a ~4GB allocation
+      field payload : Bytes, length: -> {
+        overhead = topic.bytesize + 2
+        overhead += 2 if qos?
+        len = packet_length.to_i64 - overhead
+        if len < 0
+          raise MQTT::ProtocolError.new("publish packet length #{packet_length} is too small for a #{topic.bytesize} byte topic")
+        end
         len
       }
 
