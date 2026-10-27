@@ -36,6 +36,14 @@ module MQTT
     end
 
     @client : (V3::Client | V5::Client)?
+    @on_reconnect : Proc(Bool, Nil)? = nil
+
+    # Called once a dropped connection has been re-established, with whether
+    # the broker resumed the session. See `ClientBase#on_reconnect`
+    def on_reconnect(&callback : Bool -> Nil) : Nil
+      @on_reconnect = callback
+      @client.try &.on_reconnect(&callback)
+    end
 
     # The negotiated client. Raises until `#connect` has succeeded
     def negotiated : V3::Client | V5::Client
@@ -71,6 +79,7 @@ module MQTT
       modern = V5::Client.new(
         timeout: @timeout, max_packet_size: @max_packet_size, reconnect: @reconnect, &@factory
       )
+      @on_reconnect.try { |callback| modern.on_reconnect(&callback) }
 
       begin
         ack = modern.connect(
@@ -95,6 +104,7 @@ module MQTT
       legacy = V3::Client.new(
         timeout: @timeout, max_packet_size: @max_packet_size, reconnect: @reconnect, &@factory
       )
+      @on_reconnect.try { |callback| legacy.on_reconnect(&callback) }
       ack = legacy.connect(
         username: username, password: password, keep_alive: keep_alive,
         client_id: client_id, clean_start: clean_start, will_flag: will_flag,

@@ -17,7 +17,8 @@ module MQTT::V3
       # replayed CONNECT has been written, so counting transports races
       eventually { broker.all_sent_packets(Connect, MQTT::RequestType::Connect).size == 2 }
       broker.transports.size.should eq 2
-      client.closed?.should be_false
+      # open once the broker has accepted that CONNECT, not when it is written
+      eventually { !client.closed? }
       client.terminated?.should be_false
 
       # the replayed CONNECT must carry the original options
@@ -85,6 +86,69 @@ module MQTT::V3
 
       eventually(5.seconds) { broker.transports.size == 2 }
       client.terminated?.should be_false
+      client.disconnect
+    end
+
+    # a broker that accepts the replacement connection and drops it at once.
+    # The drop lands while the reconnect is still in progress, and used to end
+    # the client for good
+    it "keeps reconnecting when a reconnection drops straight away" do
+      broker = FakeBroker.new
+      client = broker.reconnecting_client(reconnect: FAST_RECONNECT)
+      client.connect
+
+      broker.drop_after_connack = 1
+      broker.drop!
+
+      eventually(5.seconds) { broker.all_sent_packets(Connect, MQTT::RequestType::Connect).size == 3 }
+      eventually { !client.closed? }
+      client.terminated?.should be_false
+      client.disconnect
+    end
+
+    # MQTT-3.1.4-5, the broker processes nothing before it has accepted the
+    # CONNECT, and a broker taking over the old session can be slow to. What
+    # the client sends meanwhile is a protocol error to some brokers
+    it "sends nothing but the CONNECT until the broker accepts it" do
+      broker = FakeBroker.new
+      client = broker.reconnecting_client(reconnect: FAST_RECONNECT)
+      client.connect
+
+      broker.silent = [MQTT::RequestType::Connect]
+      broker.drop!
+      eventually { broker.all_sent_packets(Connect, MQTT::RequestType::Connect).size == 2 }
+
+      # connected at the socket, not yet at the protocol
+      client.closed?.should be_true
+      expect_raises(MQTT::NotConnectedError) { client.publish("some/topic", "early") }
+      sleep 20.milliseconds
+      broker.transports.last.sent_types.should eq [MQTT::RequestType::Connect]
+
+      broker.silent = [] of MQTT::RequestType
+      broker.connack!
+      eventually { !client.closed? }
+      client.publish("some/topic", "accepted")
+      eventually { broker.transports.last.sent_types.includes?(MQTT::RequestType::Publish) }
+      client.disconnect
+    end
+
+    it "reports each reconnection, and whether the session was resumed" do
+      broker = FakeBroker.new
+      client = broker.reconnecting_client(reconnect: FAST_RECONNECT)
+      reconnections = [] of Bool
+      client.on_reconnect { |session_present| reconnections << session_present }
+      client.connect(clean_start: false)
+
+      # the first connection is not a reconnection
+      sleep 20.milliseconds
+      reconnections.should be_empty
+
+      broker.drop!
+      eventually { reconnections == [false] }
+
+      broker.session_present = true
+      broker.drop!
+      eventually { reconnections == [false, true] }
       client.disconnect
     end
 

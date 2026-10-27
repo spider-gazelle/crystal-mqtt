@@ -285,7 +285,19 @@ server side and are not sent again. When reconnection is exhausted, or you call
 `disconnect`, the client is `terminated?` and `wait_close` returns.
 
 Requests made while the connection is down fail with `MQTT::NotConnectedError` —
-messages are not queued for later delivery.
+messages are not queued for later delivery. Down includes a reconnection the
+broker has not accepted yet: `closed?` stays true until its CONNACK, and nothing
+but the CONNECT is sent before it.
+
+Retained state the broker lost while you were away can be published again once
+the connection is back. `on_reconnect` runs in its own fiber after each
+reconnection, and says whether the broker resumed the session:
+
+```crystal
+client.on_reconnect do |session_present|
+  publish_current_state unless session_present
+end
+```
 
 
 ## Keep alive

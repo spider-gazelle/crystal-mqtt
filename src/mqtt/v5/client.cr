@@ -251,12 +251,12 @@ module MQTT
               will_delay_interval:     will_delay_interval,
               keep_alive_active:       keep_alive_active,
             }
-            @can_resume = true
             @disconnect_reason = nil
           end
 
           # MQTT-3.1.2.10, a broker may impose its own keep alive
           negotiated = ack.server_keep_alive.try(&.to_i) || keep_alive
+          established!
           start_keep_alive(negotiated) if keep_alive_active
         else
           @transport.close!
@@ -391,7 +391,9 @@ module MQTT
 
       def disconnect(send_msg = true, reason : ReasonCode = ReasonCode::Success) : Nil
         @terminated = true
-        return terminate! if closed?
+        # the transport, not `closed?`: one still waiting on its CONNACK has to
+        # be closed as well
+        return terminate! if @transport.closed?
 
         if send_msg
           packet = Disconnect.new
@@ -409,7 +411,7 @@ module MQTT
         @transport.close!
       end
 
-      protected def resume_session : Nil
+      protected def resume_session : Bool
         options = @message_lock.synchronize { @connect_options }
         raise Error.new("no connection to resume") unless options
 
@@ -421,6 +423,7 @@ module MQTT
         else
           replay_subscriptions
         end
+        ack.session_present
       end
 
       protected def replay_subscriptions : Nil

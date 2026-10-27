@@ -60,6 +60,16 @@ module MQTT
     # whether a session has been established that a reconnect could restore
     @can_resume : Bool = false
 
+    # whether the broker has accepted the CONNECT on the current transport.
+    # Until it has, only the packets that establish the session may be sent
+    @established : Bool = false
+
+    # set when the transport a reconnect is establishing drops, so the
+    # reconnect loop tries again rather than reporting success
+    @dropped_while_reconnecting : Bool = false
+
+    @on_reconnect : Proc(Bool, Nil)? = nil
+
     # Drives the client over a single transport, with no reconnection
     def initialize(
       transport : Transport,
@@ -96,7 +106,7 @@ module MQTT
     # Wires our callbacks up before the transport is allowed to produce data
     protected def attach(transport : Transport) : Nil
       transport.on_close do
-        on_close(transport.error)
+        on_close(transport, transport.error)
         nil
       end
 
@@ -119,8 +129,27 @@ module MQTT
       end
     end
 
-    def closed?
-      @transport.closed?
+    # True until the broker has accepted the connection, not only while the
+    # socket is down. Something sent before the CONNACK is processed by the
+    # broker before it has decided to accept us, and is a protocol error to a
+    # broker that is still taking an old session over
+    def closed? : Bool
+      !@established || @transport.closed?
+    end
+
+    # Called once a dropped connection has been re-established, with whether
+    # the broker resumed the session. Whatever the broker lost while we were
+    # away can be published again from here. Runs in its own fiber
+    def on_reconnect(&@on_reconnect : Bool -> Nil) : Nil
+    end
+
+    # Records that the broker accepted the CONNECT. Subclasses call this once
+    # the CONNACK reports success
+    protected def established! : Nil
+      @message_lock.synchronize do
+        @can_resume = true
+        @established = true
+      end
     end
 
     def terminated? : Bool
@@ -161,7 +190,12 @@ module MQTT
 
     # ---- connection lifecycle ----------------------------------------------
 
-    protected def on_close(error : ::Exception?)
+    protected def on_close(transport : Transport, error : ::Exception?)
+      # A transport a reconnect attempt gave up on can finish closing after the
+      # next one is attached. Its pending requests were already failed, and
+      # what it would reset now belongs to the new connection
+      return unless transport.same?(@transport)
+
       # Clean up the connection state here
       if error
         Log.error(exception: error) { "socket closed, error consuming IO" }
@@ -179,6 +213,7 @@ module MQTT
       waiting = [] of Pending(Header)
       pings = [] of Pending(Header)
 
+      reconnecting = false
       @message_lock.synchronize do
         connecting = @waiting_connect
         @waiting_connect = nil
@@ -186,12 +221,22 @@ module MQTT
         @waiting.clear
         pings = @waiting_ping.dup
         @waiting_ping.clear
+        @established = false
         reset_connection_state
+
+        # NOTE:: the reconnect loop owns a drop of the transport it is
+        # establishing. Terminating here instead ended the client for good
+        # whenever a broker accepted a reconnection and dropped it at once
+        if reconnecting = @reconnecting
+          @dropped_while_reconnecting = true
+        end
       end
 
       connecting.try &.reject(failure)
       waiting.each &.reject(failure)
       pings.each &.reject(failure)
+
+      return if reconnecting
 
       if reconnect_wanted?
         spawn(name: "mqtt-reconnect") { reconnect! }
@@ -235,18 +280,37 @@ module MQTT
           break
         end
 
+        # a drop can carry a reason not to come back, a 5.0 DISCONNECT
+        unless reconnect_permitted?
+          Log.error { "not reconnecting, the broker said not to" }
+          break
+        end
+
         delay = policy.delay_for(attempt)
         Log.info { "reconnecting in #{delay} (attempt #{attempt})" }
         sleep delay
         break if @terminated
 
         begin
+          @message_lock.synchronize { @dropped_while_reconnecting = false }
           transport = factory.call
           @transport = transport
           attach(transport)
-          resume_session
+          session_present = resume_session
+
+          # the broker can accept the connection and drop it straight away,
+          # before or while the session was being restored
+          resumed = @message_lock.synchronize do
+            next false if @dropped_while_reconnecting
+            @reconnecting = false
+            true
+          end
+          raise NotConnectedError.new("connection dropped as it was re-established") unless resumed
+
           Log.info { "reconnected after #{attempt} attempt(s)" }
-          @message_lock.synchronize { @reconnecting = false }
+          if callback = @on_reconnect
+            spawn(name: "mqtt-on-reconnect") { callback.call(session_present) }
+          end
           return
         rescue error
           Log.warn(exception: error) { "reconnect attempt #{attempt} failed" }
@@ -266,9 +330,9 @@ module MQTT
       true
     end
 
-    # Replays whatever is needed to put the session back the way it was.
-    # Implemented per protocol version
-    protected abstract def resume_session : Nil
+    # Replays whatever is needed to put the session back the way it was,
+    # returning whether the broker resumed it. Implemented per protocol version
+    protected abstract def resume_session : Bool
 
     # Stops the request processor and wakes anything in `wait_close`
     protected def terminate! : Nil
@@ -300,6 +364,14 @@ module MQTT
             next
           end
 
+          # MQTT-3.1.4-5, the broker processes nothing ahead of accepting the
+          # CONNECT. Checked here, where packets are written in order, so one
+          # queued before a drop is not written ahead of the next CONNECT
+          unless @established || establishing?(packet)
+            result.try &.send(NotConnectedError.new("not connected, the broker has not accepted the connection"))
+            next
+          end
+
           Log.debug { "writing packet: #{packet.inspect}" }
           @transport.send(packet)
           @last_activity = MQTT.monotonic
@@ -313,6 +385,15 @@ module MQTT
       end
     ensure
       Log.debug { "request processing has stopped" }
+    end
+
+    # The packets that may precede the CONNACK: the CONNECT, the AUTH exchange
+    # that can follow it, and a DISCONNECT abandoning the attempt
+    private def establishing?(packet : Request) : Bool
+      case packet.id
+      when .connect?, .auth?, .disconnect? then true
+      else                                      false
+      end
     end
 
     # Queues a packet and blocks until it has been written to the transport
@@ -435,10 +516,13 @@ module MQTT
     # us for exceeding the keep alive interval we negotiated
     protected def start_keep_alive(seconds : Int32) : Nil
       return if seconds <= 0
-      spawn(name: "mqtt-keepalive") { keep_alive!(seconds) }
+      transport = @transport
+      spawn(name: "mqtt-keepalive") { keep_alive!(seconds, transport) }
     end
 
-    protected def keep_alive!(seconds : Int32) : Nil
+    # Bound to the transport it was started for. Each connection starts its
+    # own, so one left from a dropped connection must not ping on the next
+    protected def keep_alive!(seconds : Int32, transport : Transport) : Nil
       # ping at 75% of the interval so a response has time to arrive
       interval = (seconds * 0.75).seconds
 
@@ -449,7 +533,7 @@ module MQTT
         when ::timeout(interval)
           # time to check on the connection
         end
-        break if closed?
+        break if transport.closed? || !transport.same?(@transport)
 
         # no need to ping a link that has been busy
         next if (MQTT.monotonic - @last_activity) < interval
@@ -458,7 +542,7 @@ module MQTT
           ping(interval)
         rescue error
           Log.warn(exception: error) { "keep alive ping failed, closing connection" }
-          @transport.close!
+          transport.close!
           break
         end
       end

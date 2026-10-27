@@ -171,6 +171,23 @@ module MQTT::V5
       broker.transports.size.should eq 1
     end
 
+    # a protocol error says the client got something wrong on that connection,
+    # and the next one starts clean. Staying down leaves it disconnected until
+    # the process restarts
+    it "reconnects after the broker reports a protocol error" do
+      broker = FakeV5Broker.new
+      client = MQTT::V5::Client.new(
+        reconnect: MQTT::Reconnect.new(initial_delay: 5.milliseconds, max_delay: 10.milliseconds)
+      ) { broker.build_transport }
+      client.connect(client_id: "disc")
+
+      broker.disconnect!(ReasonCode::ProtocolError)
+      eventually(5.seconds) { broker.transports.size == 2 }
+      eventually { !client.closed? }
+      client.terminated?.should be_false
+      client.disconnect
+    end
+
     it "does reconnect after a reason that is worth retrying" do
       broker = FakeV5Broker.new
       client = MQTT::V5::Client.new(

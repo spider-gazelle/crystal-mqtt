@@ -25,6 +25,10 @@ class FakeBroker
   # Raised by the next transport build, to simulate a broker that is still down
   property refuse_connections : Int32 = 0
 
+  # How many of the next connections to drop straight after their CONNACK, the
+  # way a broker kicks a client it has only just accepted
+  property drop_after_connack : Int32 = 0
+
   # Retained messages, exactly one per topic, surviving across connections the
   # way a real broker holds them
   getter retained = {} of String => Tuple(Bytes, MQTT::QoS)
@@ -122,12 +126,7 @@ class FakeBroker
 
     case packet.id
     when .connect?
-      ack = MQTT::V3::Connack.new
-      ack.id = MQTT::RequestType::Connack
-      ack.return_code = connack_return_code
-      ack.session_present = session_present?
-      ack.packet_length = ack.calculate_length
-      transport.receive_packet(ack)
+      accept_connect(transport)
     when .subscribe?
       sub = reparse(packet, MQTT::V3::Subscribe)
       ack = MQTT::V3::Suback.new
@@ -164,6 +163,24 @@ class FakeBroker
       resp.packet_length = 0_u32
       transport.receive_packet(resp)
     end
+  end
+
+  # Accepts the CONNECT, for a spec that held it back with `silent`
+  def connack!(transport : FakeTransport = transport) : Nil
+    ack = MQTT::V3::Connack.new
+    ack.id = MQTT::RequestType::Connack
+    ack.return_code = connack_return_code
+    ack.session_present = session_present?
+    ack.packet_length = ack.calculate_length
+    transport.receive_packet(ack)
+  end
+
+  private def accept_connect(transport : FakeTransport) : Nil
+    connack!(transport)
+    return unless @drop_after_connack > 0
+
+    @drop_after_connack -= 1
+    transport.fail!(IO::Error.new("connection reset by peer"))
   end
 
   private def send_ack(transport : FakeTransport, type : MQTT::RequestType, message_id : UInt16, qos : MQTT::QoS = MQTT::QoS::FireAndForget) : Nil

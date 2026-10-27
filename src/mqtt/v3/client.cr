@@ -192,8 +192,8 @@ module MQTT
               will_payload:      will_payload,
               keep_alive_active: keep_alive_active,
             }
-            @can_resume = true
           end
+          established!
           start_keep_alive(keep_alive) if keep_alive_active
         else
           @transport.close!
@@ -204,7 +204,9 @@ module MQTT
       def disconnect(send_msg = true) : Nil
         # a deliberate disconnect must not trigger a reconnect
         @terminated = true
-        return terminate! if closed?
+        # the transport, not `closed?`: one still waiting on its CONNACK has to
+        # be closed as well
+        return terminate! if @transport.closed?
 
         if send_msg
           disconnect = Disconnect.new
@@ -223,7 +225,7 @@ module MQTT
 
       # Replays the CONNECT that established the session, and the subscriptions
       # that were on it
-      protected def resume_session : Nil
+      protected def resume_session : Bool
         options = @message_lock.synchronize { @connect_options }
         raise Error.new("no connection to resume") unless options
 
@@ -236,6 +238,7 @@ module MQTT
         else
           replay_subscriptions
         end
+        ack.session_present
       end
 
       protected def replay_subscriptions : Nil

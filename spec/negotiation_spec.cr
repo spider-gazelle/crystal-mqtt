@@ -100,6 +100,31 @@ describe MQTT::Client do
     client.disconnect
   end
 
+  it "reports a reconnection on whichever version was negotiated" do
+    [FakeNegotiatingBroker::Behaviour::Modern, FakeNegotiatingBroker::Behaviour::LegacyOnly].each do |behaviour|
+      broker = FakeNegotiatingBroker.new
+      broker.behaviour = behaviour
+      client = MQTT::Client.new(
+        reconnect: MQTT::Reconnect.new(initial_delay: 5.milliseconds, max_delay: 10.milliseconds),
+        &broker.factory
+      )
+      reconnections = Channel(Bool).new(1)
+      client.on_reconnect { |session_present| reconnections.send(session_present) }
+      client.connect(client_id: "negotiate")
+
+      broker.transport.fail!(IO::Error.new("connection reset by peer"))
+
+      select
+      when session_present = reconnections.receive
+        session_present.should be_false
+      when timeout(5.seconds)
+        fail "#{behaviour}: no reconnection reported"
+      end
+      client.closed?.should be_false
+      client.disconnect
+    end
+  end
+
   it "surfaces a refusal that is not about the version" do
     broker = FakeV5Broker.new
     broker.connack_reason = MQTT::V5::ReasonCode::BadUserNameOrPassword
