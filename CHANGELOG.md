@@ -1,5 +1,30 @@
 # Changelog
 
+## 2.0.2
+
+Found in placeos source, which reconnected after a keep alive timeout while the
+broker still held its old connection. The broker took the session over, then
+disconnected the new connection with a protocol error, and the client never
+tried again.
+
+- **A reconnection that dropped straight away ended the client for good.** A
+  connection closing while a reconnect was still establishing it terminated the
+  client, rather than letting the reconnect loop try again. It logged
+  `reconnecting in 2s (attempt 2)` and then stopped.
+- **A protocol error or malformed packet from the broker stopped reconnection.**
+  Those describe what was sent on that connection, and the next starts clean, so
+  they are no longer treated as a reason not to come back. The backoff still
+  applies.
+- **Packets were sent before the broker accepted the connection.** `closed?` only
+  reflected the socket, so a caller checking it started publishing the moment a
+  reconnection's socket opened, ahead of the CONNACK. A broker still taking an
+  old session over can reject that. `closed?` is now true until the CONNACK, and
+  the client sends only CONNECT, AUTH and DISCONNECT before it.
+- A keep alive left from a dropped connection could ping on the next one. Each
+  is now bound to its own connection.
+- **Added `on_reconnect`**, called after each reconnection with whether the
+  broker resumed the session, for republishing state the broker lost.
+
 ## 2.0.1
 
 Two fixes found by upgrading a real consumer. **2.0.0 should be skipped.**
